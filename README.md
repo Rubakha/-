@@ -30,14 +30,32 @@ python bot_best.py
 
 ---
 
-## Деплой на Render
+## Деплой на Amvera (оплата российской картой)
 
-1. Залить файлы в репозиторий GitHub.
-2. New → Web Service → выбрать репозиторий.
-3. План **Starter** (на бесплатном нет диска).
-4. Disks → Add Disk: mount path `/var/data`, размер 1 ГБ.
-5. Environment → добавить переменные из `.env.example` (включая `YOOKASSA_PROVIDER_TOKEN`).
-6. После деплоя открыть `/health` — должно быть
+Конфиг — `amvera.yml` в корне репозитория (сборка pip, вход `bot_best.py`,
+постоянный диск на `/data`, работа в режиме polling — вебхук/домен не нужны).
+
+1. amvera.ru → зарегистрируйся, New Project → Import from Git → укажи
+   `https://github.com/Rubakha/-`.
+2. На странице проекта нажми **Generate YAML** — если сгенерированный файл
+   отличается от `amvera.yml` в репозитории, замени содержимое на то, что
+   даёт кнопка (я собрал `amvera.yml` по документации, но не проверял вживую
+   — интерфейс Amvera мог поменяться).
+3. Settings → Environment variables → добавь `TG_BOT_TOKEN`, `ADMIN_ID`,
+   `YOOKASSA_PROVIDER_TOKEN`, `ANTHROPIC_API_KEY`. **`WEBHOOK_URL` не
+   указывай** — бот сам поднимется в режиме polling, без домена и SSL.
+4. Deploy. В логах должно появиться `polling mode` и `storage ready`.
+
+Обновления: `git push` в свой GitHub → Amvera передеплоит сама (если включена
+интеграция), либо `git push amvera master` напрямую в её git-remote.
+
+## Деплой на Render (альтернатива, нужна валютная карта)
+
+1. New → Web Service → выбрать репозиторий.
+2. План **Starter** (на бесплатном нет диска).
+3. Disks → Add Disk: mount path `/var/data`, размер 1 ГБ.
+4. Environment → добавить переменные из `.env.example` (включая `YOOKASSA_PROVIDER_TOKEN`).
+5. После деплоя открыть `/health` — должно быть
    `"writable": true` и `"persistent": true`.
 
 Диск отключает zero-downtime: при каждом деплое бот недоступен 10–20 секунд.
