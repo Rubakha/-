@@ -5,6 +5,7 @@
 credentials.json
 service-account*.json
 MY_CREDENTIALS.txt
+.mcp.json
 
 # Python
 __pycache__/

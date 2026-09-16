@@ -1,20 +1,12 @@
 meta:
-  name: alisa-nevskaya-bot
-
-environment:
-  python: "3.11"
+  environment: python
+  toolchain:
+    name: pip
+    version: "3.11"
 
 build:
-  buildType: pip
-  buildFile: requirements.txt
+  requirementsPath: requirements.txt
 
 run:
-  startCommand: python bot_best.py
-
-persistenceMount:
-  - mountPath: /data
-    size: 1Gi
-
-env:
-  PYTHONUNBUFFERED: "1"
-  DATA_DIR: /data
+  scriptName: bot_best.py
+  persistenceMount: /data
