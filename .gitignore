@@ -1,0 +1,29 @@
+# Секреты — НИКОГДА не коммитить
+.env
+*.env
+!.env.example
+credentials.json
+service-account*.json
+MY_CREDENTIALS.txt
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# БД
+*.db
+*.sqlite3
+
+# Реальные данные клиентов/заказов — никогда не коммитить
+data/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Логи
+*.log
