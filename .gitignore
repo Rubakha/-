@@ -6,6 +6,8 @@ credentials.json
 service-account*.json
 MY_CREDENTIALS.txt
 .mcp.json
+google_client_secret.json
+youtube_token.json
 
 # Python
 __pycache__/

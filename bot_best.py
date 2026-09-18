@@ -676,6 +676,7 @@ def on_paid(message):
     order["paid_at"] = now_msk().isoformat()
     order["due_at"] = (now_msk() + timedelta(hours=DELIVERY_HOURS)).isoformat()
     order["charge_id"] = payment.telegram_payment_charge_id
+    order["email"] = payment.order_info.email if payment.order_info else None
     save_order(order)
 
     profile = get_client(chat_id)
@@ -701,6 +702,9 @@ def on_paid(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
 
+    receipt_line = (
+        f"Чек придёт на {esc(order['email'])}\n\n" if order.get("email") else ""
+    )
     bot.send_message(
         chat_id,
         "✅ <b>Оплата прошла</b>\n\n"
@@ -708,6 +712,7 @@ def on_paid(message):
         f"Формат: {meta['icon']} {meta['title']}\n"
         f"Оплачено: {order['price_rub']}₽\n"
         f"Готово не позднее: {fmt_dt(order['due_at'])} МСК\n\n"
+        f"{receipt_line}"
         "Письмо придёт сюда же, в этот чат, и появится в кабинете.\n"
         "Ждать в чате не нужно — я напишу сама.",
         parse_mode="HTML",
@@ -1099,10 +1104,11 @@ def notify_admin_paid(order):
             "🗂 Карточка", callback_data=f"card:show:{order['chat_id']}"
         )
     )
+    email_line = f"\n✉️ {esc(order['email'])}" if order.get("email") else ""
     safe_send(
         ADMIN_ID,
         "💳 <b>ОПЛАЧЕНО</b>\n\n"
-        f"{esc(order['name'])} (@{esc(order.get('username')) or '—'}){gift}{who}\n"
+        f"{esc(order['name'])} (@{esc(order.get('username')) or '—'}){gift}{who}{email_line}\n"
         f"{meta['icon']} {meta['title']} · {order['price_rub']}₽\n"
         f"Срок: до {fmt_dt(order['due_at'])} МСК\n\n"
         f"Вопрос:\n{esc(order['question'])}\n\n"
