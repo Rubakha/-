@@ -1,12 +1,16 @@
+---
 meta:
   environment: python
   toolchain:
     name: pip
-    version: "3.11"
-
+    version: 3.11
 build:
   requirementsPath: requirements.txt
-
+  useCache: true
 run:
-  scriptName: bot_best.py
   persistenceMount: /data
+  scriptName: bot_best.py
+  containerPort: 80
+  russianTrustedCa: false
+  singleton: true
+  zeroDowntime: false
