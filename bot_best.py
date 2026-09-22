@@ -45,71 +45,28 @@ app = Flask(__name__)
 bot = TeleBot(TG_BOT_TOKEN, threaded=False)
 
 MSK = pytz.timezone("Europe/Moscow")
-FULL_PRICE_START = MSK.localize(datetime(2026, 10, 1))
 
 # DATA_DIR указывает на постоянный диск (Render Disk).
 # Локально по умолчанию ./data, на Render — путь монтирования, напр. /var/data.
 DATA_DIR = os.getenv("DATA_DIR", "data")
 ORDERS_DIR = os.path.join(DATA_DIR, "orders")
 CLIENTS_DIR = os.path.join(DATA_DIR, "clients")
+ANKETAS_DIR = os.path.join(DATA_DIR, "anketas")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
-# срок исполнения, часы
-DELIVERY_HOURS = 48
 # сколько неоплаченных заказов можно держать одновременно
 MAX_PENDING = 1
 # интервал автобэкапа в часах, 0 — выключить
 BACKUP_EVERY_HOURS = int(os.getenv("BACKUP_EVERY_HOURS", "168"))
 
-PRICES_RUB = {
-    "intro": {"письмо": 390, "дневник": 590, "сценарий": 890},
-    "full": {"письмо": 690, "дневник": 890, "сценарий": 1290},
-}
-FORMATS = ["письмо", "дневник", "сценарий"]
+LETTER_PRICE_RUB = 299
 
-FORMAT_META = {
-    "письмо": {
-        "icon": "💌",
-        "title": "ПИСЬМО",
-        "length": "400–600 слов",
-        "read": "5–7 минут",
-        "style": "личное, прямое",
-        "best_for": "когда нужен ответ на один острый вопрос",
-        "sample": (
-            "Ты ищешь ответ, потому что боишься ошибиться.\n"
-            "Но самые живые истории получаются у тех, кто ошибался часто.\n\n"
-            "Я не дам совет. Я дам разрешение — идти дальше.\n"
-            "Твой ответ уже внутри, я только помогу его назвать."
-        ),
-    },
-    "дневник": {
-        "icon": "📖",
-        "title": "ДНЕВНИК",
-        "length": "700–1000 слов",
-        "read": "10–12 минут",
-        "style": "истории из жизни",
-        "best_for": "когда хочется не ответа, а узнавания себя",
-        "sample": (
-            "Помню летний день на Невском. Я сидела у окна и смотрела,\n"
-            "как все куда-то спешат. И каждый что-то ищет.\n\n"
-            "Тогда я поняла: готовых ответов нет. Есть только шаги.\n"
-            "Расскажу, как я тоже не знала — и всё равно пошла."
-        ),
-    },
-    "сценарий": {
-        "icon": "🎬",
-        "title": "СЦЕНАРИЙ",
-        "length": "1000–1500 слов",
-        "read": "15–18 минут",
-        "style": "диалог, встреча в кафе",
-        "best_for": "когда тема большая и в одно письмо не влезает",
-        "sample": (
-            "Мы встречаемся в маленьком кафе на Невском.\n"
-            "Ты рассказываешь. Я слушаю и переспрашиваю.\n\n"
-            "А потом говорю всё, что думаю. Честно, без обтекаемости.\n"
-            "Как живой разговор, только его можно перечитать."
-        ),
-    },
+PAIN_META = {
+    "breakup":    {"icon": "💔", "title": "Расставание"},
+    "resentment": {"icon": "😔", "title": "Обида"},
+    "loneliness": {"icon": "🌙", "title": "Одиночество"},
+    "fear":       {"icon": "🌫", "title": "Страх"},
+    "unspoken":   {"icon": "💭", "title": "Недосказанность"},
 }
 
 REVIEWS = [
@@ -134,7 +91,7 @@ STATES = {}
 # ─────────────────────────────────────────────────────────────
 
 def ensure_dirs():
-    for path in (DATA_DIR, ORDERS_DIR, CLIENTS_DIR, EXPORTS_DIR):
+    for path in (DATA_DIR, ORDERS_DIR, CLIENTS_DIR, ANKETAS_DIR, EXPORTS_DIR):
         os.makedirs(path, exist_ok=True)
 
 
@@ -184,20 +141,37 @@ def fmt_dt(iso_str):
     return dt.astimezone(MSK).strftime("%d.%m в %H:%M")
 
 
-def price_tier():
-    return "intro" if now_msk() < FULL_PRICE_START else "full"
-
-
-def rub(fmt):
-    return PRICES_RUB[price_tier()].get(fmt, PRICES_RUB[price_tier()]["письмо"])
-
-
 def client_path(chat_id):
     return os.path.join(CLIENTS_DIR, f"{chat_id}.json")
 
 
 def order_path(order_id):
     return os.path.join(ORDERS_DIR, f"{order_id}.json")
+
+
+def anketa_path(anketa_id):
+    return os.path.join(ANKETAS_DIR, f"{anketa_id}.json")
+
+
+def save_anketa(anketa):
+    write_json(anketa_path(anketa["anketa_id"]), anketa)
+
+
+def get_anketa(anketa_id):
+    return read_json(anketa_path(anketa_id), None)
+
+
+def pain_meta(order_or_key):
+    """Принимает order (dict) или сам ключ боли, возвращает {icon, title}."""
+    key = order_or_key.get("pain") if isinstance(order_or_key, dict) else order_or_key
+    return PAIN_META.get(key, {"icon": "•", "title": key or "—"})
+
+
+def order_summary(order, limit=400):
+    """Короткое превью ответов клиента — замена старому order['question']."""
+    answers = order.get("answers") or []
+    text = " / ".join(a for a in answers if a)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def get_client(chat_id):
@@ -281,6 +255,10 @@ def new_order_id():
     return f"ALI-{int(now_msk().timestamp())}"
 
 
+def new_anketa_id():
+    return f"ANK-{int(now_msk().timestamp() * 1000)}"
+
+
 def pending_count(chat_id):
     return len([o for o in client_orders(chat_id) if o.get("status") == "pending"])
 
@@ -312,14 +290,13 @@ def kb_admin():
     return kb
 
 
-def kb_formats(prefix="fmt"):
+def kb_pains(prefix="pain"):
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for f in FORMATS:
-        meta = FORMAT_META[f]
+    for key, meta in PAIN_META.items():
         kb.add(
             types.InlineKeyboardButton(
-                f"{meta['icon']} {meta['title']} · {rub(f)}₽",
-                callback_data=f"{prefix}:{f}",
+                f"{meta['icon']} {meta['title']}",
+                callback_data=f"{prefix}:{key}",
             )
         )
     return kb
@@ -419,19 +396,16 @@ def cmd_start(message):
         f"Не советы — разговор.\n"
         f"{invited}\n"
         f"⭐ 4.8 из 5 · письма получили 234 человека\n"
-        f"Письмо от {rub('письмо')}₽, готово за 24–48 часов."
+        f"Короткий разговор — и письмо целиком, сразу. {LETTER_PRICE_RUB}₽."
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb_client())
 
 
 # ─────────────────────────────────────────────────────────────
-# ЗАКАЗ: ШАГ 1 — ФОРМАТ
+# ДИАГНОСТИКА: ШАГ 1 — ВЫБОР БОЛИ
 # ─────────────────────────────────────────────────────────────
 
-@bot.message_handler(func=lambda m: m.text == "💌 Заказать письмо")
-def order_start(message):
-    chat_id = message.chat.id
-
+def ask_diagnostic_start(chat_id, gift_for=None):
     if pending_count(chat_id) >= MAX_PENDING:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
@@ -443,139 +417,188 @@ def order_start(message):
         )
         return
 
-    STATES[chat_id] = {"step": "format"}
+    STATES[chat_id] = {"step": "choosing_pain", "gift_for": gift_for}
+    prefix = "giftpain" if gift_for else "pain"
     bot.send_message(
         chat_id,
-        "Выбери формат. Дальше покажу пример, как это выглядит 👇",
-        reply_markup=kb_formats(),
+        "Что сейчас держит тебя крепче всего?" if not gift_for else
+        f"Что держит {esc(gift_for)} крепче всего?",
+        reply_markup=kb_pains(prefix=prefix),
     )
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fmt:"))
-def order_format(call):
-    chat_id = call.message.chat.id
-    fmt = call.data.split(":", 1)[1]
-    if fmt not in FORMAT_META:
-        bot.answer_callback_query(call.id, "Неизвестный формат")
+@bot.message_handler(func=lambda m: m.text == "💌 Заказать письмо")
+def order_start(message):
+    ask_diagnostic_start(message.chat.id)
+
+
+def start_pain(chat_id, pain_key, gift_for=None):
+    if pain_key not in PAIN_META:
         return
+    anketa_id = new_anketa_id()
+    STATES[chat_id] = {
+        "step": "diag_q1",
+        "anketa_id": anketa_id,
+        "pain": pain_key,
+        "answers": [],
+        "history": [],
+        "gift_for": gift_for,
+    }
+    save_anketa({
+        "anketa_id": anketa_id,
+        "chat_id": chat_id,
+        "pain": pain_key,
+        "answers": [],
+        "mirror_text": None,
+        "letter_text": None,
+        "order_id": None,
+        "created_at": now_msk().isoformat(),
+        "updated_at": now_msk().isoformat(),
+    })
 
-    STATES[chat_id] = {"step": "confirm_format", "format": fmt}
-    meta = FORMAT_META[fmt]
-
-    text = (
-        f"{meta['icon']} <b>{meta['title']}</b> — {rub(fmt)}₽\n\n"
-        f"Объём: {meta['length']}\n"
-        f"Чтение: {meta['read']}\n"
-        f"Стиль: {meta['style']}\n"
-        f"Подходит: {meta['best_for']}\n\n"
-        f"─── как это звучит ───\n"
-        f"<i>{meta['sample']}</i>\n"
-        f"─────────────────────\n\n"
-        f"{random_review()}"
-    )
-
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("✅ Да, беру этот формат", callback_data=f"ask:{fmt}"))
-    kb.add(types.InlineKeyboardButton("↩️ Другой формат", callback_data="back:formats"))
-    safe_edit(call, text, kb)
-    bot.answer_callback_query(call.id)
+    pain_title = PAIN_META[pain_key]["title"]
+    bot.send_chat_action(chat_id, "typing")
+    question = AI.diagnostic_question(pain_title, []) if (AI and AI.available()) else \
+        "Расскажи, что сейчас происходит — своими словами, как получится."
+    STATES[chat_id]["q1"] = question
+    bot.send_message(chat_id, question)
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "back:formats")
-def order_back_formats(call):
-    STATES[call.message.chat.id] = {"step": "format"}
-    safe_edit(call, "Выбери формат 👇", kb_formats())
-    bot.answer_callback_query(call.id)
-
-
-# ─────────────────────────────────────────────────────────────
-# ЗАКАЗ: ШАГ 2 — ВОПРОС
-# ─────────────────────────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ask:"))
-def order_ask_question(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pain:"))
+def order_pain_chosen(call):
     chat_id = call.message.chat.id
-    fmt = call.data.split(":", 1)[1]
-    STATES[chat_id] = {"step": "question", "format": fmt}
-
-    meta = FORMAT_META[fmt]
-    text = (
-        f"{meta['icon']} {meta['title']} · {rub(fmt)}₽\n\n"
-        "<b>Напиши свой вопрос</b>\n\n"
-        "Что тебя волнует? Что ты хочешь спросить у Алисы?\n\n"
-        "Пиши как есть — одним сообщением, без формулировок «правильно»."
-    )
-    safe_edit(call, text)
+    key = call.data.split(":", 1)[1]
     bot.answer_callback_query(call.id)
+    start_pain(chat_id, key)
 
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("giftpain:"))
+def gift_pain_chosen(call):
+    chat_id = call.message.chat.id
+    key = call.data.split(":", 1)[1]
+    state = STATES.get(chat_id) or {}
+    gift_for = state.get("gift_for")
+    bot.answer_callback_query(call.id)
+    if not gift_for:
+        bot.send_message(chat_id, "Начни заново: «🎁 Подарочное письмо».")
+        return
+    start_pain(chat_id, key, gift_for=gift_for)
+
+
+# ─────────────────────────────────────────────────────────────
+# ДИАГНОСТИКА: ШАГ 2 — ДВА УТОЧНЯЮЩИХ ВОПРОСА
+# ─────────────────────────────────────────────────────────────
 
 @bot.message_handler(
-    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "question"
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_q1"
     and m.content_type == "text"
 )
-def order_receive_question(message):
+def diag_receive_answer_1(message):
     chat_id = message.chat.id
-    question = (message.text or "").strip()
-
-    if len(question) < 15:
-        bot.send_message(
-            chat_id,
-            "Слишком коротко — я не пойму контекст.\n"
-            "Опиши ситуацию хотя бы парой предложений.",
-        )
+    answer = (message.text or "").strip()
+    if len(answer) < 2:
+        bot.send_message(chat_id, "Скажи чуть подробнее — хотя бы пару слов.")
         return
-    if len(question) > 2000:
+    if len(answer) > 2000:
         bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
         return
 
     state = STATES[chat_id]
-    state["question"] = question
-    state["step"] = "summary"
+    state["answers"] = [answer]
+    state["history"] = [(state.get("q1", ""), answer)]
+    state["step"] = "diag_q2"
+    save_anketa_update(state, answers=[answer])
 
-    fmt = state["format"]
-    meta = FORMAT_META[fmt]
-    ready_by = now_msk() + timedelta(hours=DELIVERY_HOURS)
+    pain_title = PAIN_META[state["pain"]]["title"]
+    bot.send_chat_action(chat_id, "typing")
+    question = AI.diagnostic_question(pain_title, state["history"]) if (AI and AI.available()) else \
+        "А если заглянуть чуть глубже — с чем это связано сильнее всего?"
+    state["q2"] = question
+    bot.send_message(chat_id, question)
 
-    preview = esc(question if len(question) <= 400 else question[:400] + "…")
-    text = (
-        "🧾 <b>Проверь заказ</b>\n\n"
-        f"Формат: {meta['icon']} {meta['title']} ({meta['length']})\n"
-        f"Цена: <b>{rub(fmt)}₽</b>\n"
-        f"Готово не позднее: {ready_by.strftime('%d.%m в %H:%M')} МСК\n\n"
-        "Твой вопрос:\n"
-        f"<i>{preview}</i>\n\n"
-        "🔒 Оплата внутри Telegram\n"
-        "♻️ Не откликнулось — перепишу один раз бесплатно\n\n"
-        "Всё верно?"
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_q2"
+    and m.content_type == "text"
+)
+def diag_receive_answer_2(message):
+    chat_id = message.chat.id
+    answer = (message.text or "").strip()
+    if len(answer) < 2:
+        bot.send_message(chat_id, "Скажи чуть подробнее — хотя бы пару слов.")
+        return
+    if len(answer) > 2000:
+        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
+        return
+
+    state = STATES[chat_id]
+    answers = state["answers"] + [answer]
+    state["answers"] = answers
+    state["step"] = "generating"
+    save_anketa_update(state, answers=answers)
+
+    pain_title = PAIN_META[state["pain"]]["title"]
+    bot.send_chat_action(chat_id, "typing")
+
+    if AI and AI.available():
+        mirror = AI.mirror_reflection(pain_title, answers)
+    else:
+        mirror = "Сейчас сложно всё разложить по полочкам — и это тоже честно."
+    bot.send_message(chat_id, mirror)
+    state["mirror_text"] = mirror
+    save_anketa_update(state, mirror_text=mirror)
+
+    bot.send_chat_action(chat_id, "typing")
+    if AI and AI.available():
+        letter = AI.generate_letter(pain_title, answers, mirror, state.get("gift_for"))
+    else:
+        letter = "[ai] Помощник выключен — письмо не сгенерировано."
+    state["letter_text"] = letter
+    state["step"] = "paywall"
+    save_anketa_update(state, letter_text=letter)
+
+    preview = letter if len(letter) <= 350 else letter[:350] + "…"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(
+        f"🔓 Получить письмо целиком — {LETTER_PRICE_RUB}₽", callback_data="letter:buy"
+    ))
+    kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data="letter:cancel"))
+    bot.send_message(
+        chat_id,
+        f"{esc(preview)}\n\n🔒 Дальше — продолжение письма, целиком, у тебя в чате.",
+        parse_mode="HTML",
+        reply_markup=kb,
     )
 
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton(f"💳 Оплатить {rub(fmt)}₽", callback_data="ord:create"))
-    kb.add(types.InlineKeyboardButton("✏️ Изменить вопрос", callback_data=f"ask:{fmt}"))
-    kb.add(types.InlineKeyboardButton("↩️ Другой формат", callback_data="back:formats"))
-    kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data="ord:cancel"))
-    safe_send(chat_id, text, markup=kb)
 
-
-@bot.callback_query_handler(func=lambda c: c.data == "ord:cancel")
-def order_cancel(call):
+@bot.callback_query_handler(func=lambda c: c.data == "letter:cancel")
+def letter_cancel(call):
     STATES.pop(call.message.chat.id, None)
-    safe_edit(call, "Заказ отменён. Если захочешь вернуться — жми «💌 Заказать письмо».")
+    safe_edit(call, "Хорошо, остановились здесь. Если захочешь вернуться — жми «💌 Заказать письмо».")
     bot.answer_callback_query(call.id)
 
 
+def save_anketa_update(state, **fields):
+    anketa = get_anketa(state.get("anketa_id"))
+    if not anketa:
+        return
+    anketa.update(fields)
+    anketa["updated_at"] = now_msk().isoformat()
+    save_anketa(anketa)
+
+
 # ─────────────────────────────────────────────────────────────
-# ЗАКАЗ: ШАГ 3 — СОЗДАНИЕ И ОПЛАТА
+# ОПЛАТА
 # ─────────────────────────────────────────────────────────────
 
-@bot.callback_query_handler(func=lambda c: c.data == "ord:create")
+@bot.callback_query_handler(func=lambda c: c.data == "letter:buy")
 def order_create(call):
     chat_id = call.message.chat.id
     state = STATES.get(chat_id) or {}
-    fmt = state.get("format")
-    question = state.get("question")
+    letter = state.get("letter_text")
+    answers = state.get("answers")
 
-    if not fmt or not question:
+    if not letter or not answers:
         safe_edit(call, "Заказ устарел. Начни заново: «💌 Заказать письмо».")
         bot.answer_callback_query(call.id)
         return
@@ -587,23 +610,23 @@ def order_create(call):
         "chat_id": chat_id,
         "name": profile["name"],
         "username": profile.get("username", ""),
-        "format": fmt,
-        "question": question,
-        "price_rub": rub(fmt),
+        "pain": state["pain"],
+        "answers": answers,
+        "mirror_text": state.get("mirror_text"),
+        "letter_text": letter,
+        "price_rub": LETTER_PRICE_RUB,
         "status": "pending",
         "is_gift": bool(state.get("gift_for")),
         "gift_for": state.get("gift_for"),
         "created_at": now_msk().isoformat(),
         "paid_at": None,
         "delivered_at": None,
-        "due_at": (now_msk() + timedelta(hours=DELIVERY_HOURS)).isoformat(),
-        "letter_text": None,
+        "email": None,
         "rating": None,
     }
     save_order(order)
-    STATES.pop(chat_id, None)
+    save_anketa_update(state, order_id=order_id)
 
-    meta = FORMAT_META[fmt]
     if not YOOKASSA_PROVIDER_TOKEN:
         bot.answer_callback_query(call.id)
         bot.send_message(
@@ -613,14 +636,15 @@ def order_create(call):
         log.error("order %s: YOOKASSA_PROVIDER_TOKEN не задан", order_id)
         return
     try:
+        pain_title = PAIN_META[state["pain"]]["title"]
         bot.send_invoice(
             chat_id=chat_id,
-            title=f"{meta['title']} от Алисы",
-            description=f"{meta['length']}. Готово за 24–48 часов. Заказ {order_id}.",
+            title=f"Письмо от Алисы · {pain_title}",
+            description=f"Целиком, сразу после оплаты. Заказ {order_id}.",
             invoice_payload=order_id,
             provider_token=YOOKASSA_PROVIDER_TOKEN,
             currency="RUB",
-            prices=[LabeledPrice(label=meta["title"], amount=rub(fmt) * 100)],  # в копейках
+            prices=[LabeledPrice(label="Письмо", amount=LETTER_PRICE_RUB * 100)],  # в копейках
             need_email=True,
             send_email_to_provider=True,  # ЮKassa требует чек 54-ФЗ
         )
@@ -672,12 +696,13 @@ def on_paid(message):
         )
         return
 
-    order["status"] = "paid"
+    order["status"] = "done"
     order["paid_at"] = now_msk().isoformat()
-    order["due_at"] = (now_msk() + timedelta(hours=DELIVERY_HOURS)).isoformat()
+    order["delivered_at"] = now_msk().isoformat()
     order["charge_id"] = payment.telegram_payment_charge_id
     order["email"] = payment.order_info.email if payment.order_info else None
     save_order(order)
+    STATES.pop(chat_id, None)
 
     profile = get_client(chat_id)
     if profile:
@@ -698,7 +723,7 @@ def on_paid(message):
                 except Exception:
                     pass
 
-    meta = FORMAT_META[order["format"]]
+    meta = pain_meta(order)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
 
@@ -709,15 +734,34 @@ def on_paid(message):
         chat_id,
         "✅ <b>Оплата прошла</b>\n\n"
         f"Номер заказа: <code>{order_id}</code>\n"
-        f"Формат: {meta['icon']} {meta['title']}\n"
-        f"Оплачено: {order['price_rub']}₽\n"
-        f"Готово не позднее: {fmt_dt(order['due_at'])} МСК\n\n"
+        f"{meta['icon']} {meta['title']}\n"
+        f"Оплачено: {order['price_rub']}₽\n\n"
         f"{receipt_line}"
-        "Письмо придёт сюда же, в этот чат, и появится в кабинете.\n"
-        "Ждать в чате не нужно — я напишу сама.",
+        "Письмо — следующим сообщением.",
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+    letter = order["letter_text"]
+    rate_kb = types.InlineKeyboardMarkup(row_width=5)
+    rate_kb.row(
+        *[
+            types.InlineKeyboardButton("⭐" * i, callback_data=f"rate:{order_id}:{i}")
+            for i in range(1, 6)
+        ]
+    )
+    safe_letter = esc(letter)
+    if len(safe_letter) <= 3900:
+        bot.send_message(chat_id, safe_letter, parse_mode="HTML", reply_markup=rate_kb)
+    else:
+        for i in range(0, len(letter), 3800):
+            chunk = letter[i:i + 3800]
+            is_last = i + 3800 >= len(letter)
+            bot.send_message(
+                chat_id, esc(chunk), parse_mode="HTML",
+                reply_markup=rate_kb if is_last else None,
+            )
+
     notify_admin_paid(order)
 
 
@@ -747,9 +791,8 @@ def cabinet_view(chat_id):
         lines.append("<b>Мои заказы</b>")
         for o in orders[:10]:
             icon, label = STATUS_LABEL.get(o.get("status"), ("•", o.get("status", "")))
-            meta = FORMAT_META.get(o["format"], {"icon": "•", "title": o["format"]})
-            q = o["question"]
-            short = esc(q if len(q) <= 40 else q[:40] + "…")
+            meta = pain_meta(o)
+            short = esc(order_summary(o, limit=40))
             lines.append(
                 f"\n{icon} {meta['icon']} {meta['title']} — {label}\n"
                 f"   «{short}»\n"
@@ -758,7 +801,7 @@ def cabinet_view(chat_id):
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     for o in done[:5]:
-        meta = FORMAT_META.get(o["format"], {"icon": "•", "title": o["format"]})
+        meta = pain_meta(o)
         kb.add(
             types.InlineKeyboardButton(
                 f"📖 Читать: {meta['title']} · {fmt_dt(o.get('delivered_at'))}",
@@ -785,9 +828,8 @@ def cabinet_home(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "cab:new")
 def cabinet_new_order(call):
-    STATES[call.message.chat.id] = {"step": "format"}
-    safe_edit(call, "Выбери формат 👇", kb_formats())
     bot.answer_callback_query(call.id)
+    ask_diagnostic_start(call.message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cab:read:"))
@@ -803,7 +845,7 @@ def cabinet_read(call):
         bot.answer_callback_query(call.id, "Письмо ещё пишется")
         return
 
-    meta = FORMAT_META.get(order["format"], {"icon": "•", "title": order["format"]})
+    meta = pain_meta(order)
     header = f"{meta['icon']} <b>{meta['title']}</b> · {fmt_dt(order.get('delivered_at'))}\n\n"
     body = esc(order["letter_text"])
 
@@ -863,8 +905,8 @@ def cabinet_rate(call):
 
 def gift_menu_markup():
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🎁 Вопрос напишу я", callback_data="gift:self"))
-    kb.add(types.InlineKeyboardButton("✍️ Пусть спросит сам", callback_data="gift:link"))
+    kb.add(types.InlineKeyboardButton("🎁 Отвечу за друга", callback_data="gift:self"))
+    kb.add(types.InlineKeyboardButton("✍️ Пусть пройдёт сам", callback_data="gift:link"))
     kb.add(types.InlineKeyboardButton("↩️ Назад", callback_data="cab:home"))
     return kb
 
@@ -872,9 +914,9 @@ def gift_menu_markup():
 GIFT_TEXT = (
     "🎁 <b>Подарочное письмо</b>\n\n"
     "Два способа:\n\n"
-    "🎁 <b>Вопрос напишу я</b> — ты формулируешь вопрос за друга "
-    "и оплачиваешь. Письмо получите оба.\n\n"
-    "✍️ <b>Пусть спросит сам</b> — отправляешь ссылку, друг заказывает "
+    "🎁 <b>Отвечу за друга</b> — ты проходишь короткий разговор за него "
+    "и оплачиваешь. Письмо адресовано ему.\n\n"
+    "✍️ <b>Пусть пройдёт сам</b> — отправляешь ссылку, друг заказывает "
     "сам. Тебе 50₽ бонуса."
 )
 
@@ -915,7 +957,7 @@ def gift_self(call):
     STATES[chat_id] = {"step": "gift_contact"}
     safe_edit(
         call,
-        "🎁 <b>Шаг 1 из 3</b>\n\n"
+        "🎁 <b>Подарок</b>\n\n"
         "Кому подарок? Напиши @username или имя друга —\n"
         "это попадёт в заказ, чтобы я знала, для кого пишу.",
     )
@@ -933,37 +975,8 @@ def gift_contact(message):
         bot.send_message(chat_id, "Слишком коротко. Напиши @username или имя.")
         return
 
-    STATES[chat_id] = {"step": "gift_format", "gift_for": contact}
-    bot.send_message(
-        chat_id,
-        f"🎁 <b>Шаг 2 из 3</b>\n\nПодарок для: {esc(contact)}\nТеперь выбери формат 👇",
-        parse_mode="HTML",
-        reply_markup=kb_formats(prefix="giftfmt"),
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("giftfmt:"))
-def gift_format(call):
-    chat_id = call.message.chat.id
-    fmt = call.data.split(":", 1)[1]
-    state = STATES.get(chat_id) or {}
-    gift_for = state.get("gift_for")
-
-    if fmt not in FORMAT_META or not gift_for:
-        bot.answer_callback_query(call.id, "Начни заново")
-        return
-
-    STATES[chat_id] = {"step": "question", "format": fmt, "gift_for": gift_for}
-    meta = FORMAT_META[fmt]
-    safe_edit(
-        call,
-        f"🎁 <b>Шаг 3 из 3</b>\n\n"
-        f"Подарок для: {esc(gift_for)}\n"
-        f"Формат: {meta['icon']} {meta['title']} · {rub(fmt)}₽\n\n"
-        "Какой вопрос задать от его имени?\n"
-        "Напиши так, как спросил бы он сам.",
-    )
-    bot.answer_callback_query(call.id)
+    bot.send_message(chat_id, f"🎁 Подарок для: {esc(contact)}", parse_mode="HTML")
+    ask_diagnostic_start(chat_id, gift_for=contact)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -974,8 +987,17 @@ def gift_format(call):
 def show_examples(message):
     bot.send_message(
         message.chat.id,
-        "Выбери формат — покажу отрывок и параметры 👇",
-        reply_markup=kb_formats(),
+        "Вот как это звучит 👇\n\n"
+        "─────────────────────\n"
+        "<i>Ты ищешь ответ, потому что боишься ошибиться.\n"
+        "Но самые живые истории получаются у тех, кто ошибался часто.\n\n"
+        "Я не дам совет. Я дам разрешение — идти дальше.\n"
+        "Твой ответ уже внутри, я только помогу его назвать.</i>\n"
+        "─────────────────────\n\n"
+        f"{random_review()}\n\n"
+        "Короткий разговор о том, что тебя держит — и письмо целиком, сразу.",
+        parse_mode="HTML",
+        reply_markup=kb_client(),
     )
 
 
@@ -1003,9 +1025,8 @@ def help_menu(message):
     bot.send_message(
         chat_id,
         "❓ <b>Помощь</b>\n\n"
-        f"<b>Сроки.</b> 24–48 часов, максимум 72.\n"
-        f"<b>Цена.</b> Письмо {rub('письмо')}₽, дневник {rub('дневник')}₽, "
-        f"сценарий {rub('сценарий')}₽.\n"
+        "<b>Сроки.</b> Письмо приходит сразу после оплаты.\n"
+        f"<b>Цена.</b> {LETTER_PRICE_RUB}₽ за письмо.\n"
         "<b>Оплата.</b> Картой через ЮKassa, внутри приложения.\n"
         "<b>Гарантия.</b> Не откликнулось — перепишу один раз бесплатно.\n"
         "<b>Приватность.</b> Вопросы не публикую и никому не пересылаю.\n\n"
@@ -1071,7 +1092,7 @@ def support_receive(message):
 def notify_admin_new_order(order):
     if not ADMIN_ID:
         return
-    meta = FORMAT_META.get(order["format"], {"icon": "•", "title": order["format"]})
+    meta = pain_meta(order)
     gift = f"\n🎁 Подарок для: {esc(order['gift_for'])}" if order.get("is_gift") else ""
     safe_send(
         ADMIN_ID,
@@ -1085,7 +1106,7 @@ def notify_admin_new_order(order):
 def notify_admin_paid(order):
     if not ADMIN_ID:
         return
-    meta = FORMAT_META.get(order["format"], {"icon": "•", "title": order["format"]})
+    meta = pain_meta(order)
     gift = f"\n🎁 Подарок для: {order['gift_for']}" if order.get("is_gift") else ""
     prev = [
         o for o in client_orders(order["chat_id"])
@@ -1096,7 +1117,7 @@ def notify_admin_paid(order):
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton(
-            "✍️ Написать письмо", callback_data=f"adm:write:{order['order_id']}"
+            "🔁 Перегенерировать и переслать", callback_data=f"adm:regen:{order['order_id']}"
         )
     )
     kb.add(
@@ -1105,13 +1126,14 @@ def notify_admin_paid(order):
         )
     )
     email_line = f"\n✉️ {esc(order['email'])}" if order.get("email") else ""
+    letter_text = order.get("letter_text") or ""
+    letter_preview = esc(letter_text if len(letter_text) <= 250 else letter_text[:250] + "…")
     safe_send(
         ADMIN_ID,
-        "💳 <b>ОПЛАЧЕНО</b>\n\n"
+        "💳 <b>ОПЛАЧЕНО, письмо отправлено</b>\n\n"
         f"{esc(order['name'])} (@{esc(order.get('username')) or '—'}){gift}{who}{email_line}\n"
-        f"{meta['icon']} {meta['title']} · {order['price_rub']}₽\n"
-        f"Срок: до {fmt_dt(order['due_at'])} МСК\n\n"
-        f"Вопрос:\n{esc(order['question'])}\n\n"
+        f"{meta['icon']} {meta['title']} · {order['price_rub']}₽\n\n"
+        f"Письмо (начало):\n<i>{letter_preview}</i>\n\n"
         f"<code>{order['order_id']}</code>",
         markup=kb,
     )
@@ -1136,9 +1158,8 @@ def orders_list_text(status_filter):
     lines = []
     for o in orders[:20]:
         icon, label = STATUS_LABEL.get(o.get("status"), ("•", ""))
-        meta = FORMAT_META.get(o["format"], {"icon": "•", "title": o["format"]})
-        q = o["question"]
-        short = esc(q if len(q) <= 60 else q[:60] + "…")
+        meta = pain_meta(o)
+        short = esc(order_summary(o, limit=60))
         lines.append(
             f"{icon} {meta['icon']} {esc(o['name'])} · {o['price_rub']}₽ · {label}\n"
             f"   «{short}»\n"
@@ -1193,11 +1214,11 @@ def admin_stats(message):
     ratings = [o["rating"] for o in orders if o.get("rating")]
     avg = round(sum(ratings) / len(ratings), 1) if ratings else "—"
 
-    by_format = {}
+    by_pain = {}
     for o in paid:
-        by_format[o["format"]] = by_format.get(o["format"], 0) + 1
-    fmt_lines = "\n".join(
-        f"  {FORMAT_META[f]['icon']} {f}: {n}" for f, n in by_format.items()
+        by_pain[o.get("pain")] = by_pain.get(o.get("pain"), 0) + 1
+    pain_lines = "\n".join(
+        f"  {pain_meta(p)['icon']} {pain_meta(p)['title']}: {n}" for p, n in by_pain.items()
     ) or "  —"
 
     ensure_dirs()
@@ -1209,13 +1230,11 @@ def admin_stats(message):
         f"Клиентов: {clients_total}\n"
         f"Заказов всего: {len(orders)}\n"
         f"Оплачено: {len(paid)}\n"
-        f"В работе: {len([o for o in orders if o.get('status') == 'paid'])}\n"
-        f"Отправлено: {len([o for o in orders if o.get('status') == 'done'])}\n"
         f"Не оплачено: {len([o for o in orders if o.get('status') == 'pending'])}\n\n"
         f"Выручка: <b>{revenue}₽</b>\n"
         f"Средний чек: {round(revenue / len(paid)) if paid else 0}₽\n"
         f"Средняя оценка: {avg}\n\n"
-        f"По форматам:\n{fmt_lines}",
+        f"По болям:\n{pain_lines}",
         parse_mode="HTML",
     )
 
@@ -1257,11 +1276,10 @@ def client_card(chat_id, exclude_order=None):
         lines.append(f"\n📝 <b>Заметки:</b>\n<i>{esc(profile['notes'])}</i>")
 
     if done:
-        lines.append("\n<b>О чём спрашивал раньше:</b>")
+        lines.append("\n<b>С чем приходил раньше:</b>")
         for o in done[:4]:
-            meta = FORMAT_META.get(o["format"], {"icon": "•"})
-            q = o.get("question") or ""
-            q = q if len(q) <= 110 else q[:110] + "…"
+            meta = pain_meta(o)
+            q = order_summary(o, limit=110)
             rate = f" · {o['rating']}⭐" if o.get("rating") else ""
             lines.append(f"{meta['icon']} {fmt_dt(o.get('delivered_at'))}{rate}\n«{esc(q)}»")
 
@@ -1443,69 +1461,69 @@ def card_letters(call):
 
     bot.answer_callback_query(call.id)
     for o in done[:3]:
-        meta = FORMAT_META.get(o["format"], {"icon": "•", "title": o["format"]})
+        meta = pain_meta(o)
         body = o["letter_text"]
         body = body if len(body) <= 3000 else body[:3000] + "…"
         bot.send_message(
             ADMIN_ID,
             f"{meta['icon']} <b>{meta['title']}</b> · {fmt_dt(o.get('delivered_at'))}\n"
-            f"Вопрос: <i>{esc((o.get('question') or '')[:150])}</i>\n\n"
+            f"Ответы: <i>{esc(order_summary(o, limit=150))}</i>\n\n"
             f"{esc(body)}",
             parse_mode="HTML",
         )
 
 
-def start_writing(chat_id, order_id):
+def admin_regenerate(chat_id, order_id):
+    """Перегенерирует письмо тем же ИИ (на тех же ответах анкеты) — ручная
+    страховка на случай неудачного автоматического результата."""
     order = get_order(order_id)
     if not order:
         bot.send_message(chat_id, f"Заказ {order_id} не найден.")
         return
-    if order.get("status") == "pending":
-        bot.send_message(chat_id, "⚠️ Заказ ещё не оплачен. Всё равно можно написать.")
+    if not order.get("answers"):
+        bot.send_message(chat_id, "У заказа нет данных анкеты — перегенерировать нечем.")
+        return
+    if not (AI and AI.available()):
+        bot.send_message(chat_id, "🤖 Помощник выключен — перегенерировать нечем.")
+        return
 
-    STATES[chat_id] = {"step": "admin_write", "order_id": order_id}
-    meta = FORMAT_META.get(order["format"], {"icon": "•", "title": order["format"]})
-    gift = f"\n🎁 Для: {esc(order['gift_for'])}" if order.get("is_gift") else ""
-
-    # карточка человека приходит первой — контекст до текста
     safe_send(
         chat_id,
         client_card(order["chat_id"], exclude_order=order_id),
         markup=kb_card(order["chat_id"], order_id=order_id),
     )
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    if AI and AI.available():
-        kb.row(
-            types.InlineKeyboardButton("🔍 Разобрать вопрос",
-                                       callback_data=f"ai:analyze:{order_id}"),
-            types.InlineKeyboardButton("✏️ Черновик",
-                                       callback_data=f"ai:draft:{order_id}"),
-        )
-    # эти кнопки есть всегда, независимо от помощника
-    kb.row(
-        types.InlineKeyboardButton("🗂 Карточка",
-                                   callback_data=f"card:show:{order['chat_id']}"),
-        types.InlineKeyboardButton("❌ Отмена", callback_data="adm:cancel_write"),
+    bot.send_chat_action(chat_id, "typing")
+    meta = pain_meta(order)
+    draft = AI.generate_letter(
+        meta["title"], order["answers"], order.get("mirror_text", ""), order.get("gift_for")
+    )
+    STATES[chat_id] = {"step": "admin_regen", "order_id": order_id, "draft": draft}
+
+    gift = f"\n🎁 Для: {esc(order['gift_for'])}" if order.get("is_gift") else ""
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(
+        "📤 Отправить клиенту вместо старого", callback_data=f"adm:send_regen:{order_id}"
+    ))
+    kb.add(types.InlineKeyboardButton("🔁 Ещё вариант", callback_data=f"adm:regen:{order_id}"))
+    kb.add(types.InlineKeyboardButton(
+        "🗂 Карточка", callback_data=f"card:show:{order['chat_id']}"
+    ))
+    send_long(
+        chat_id, draft,
+        f"✏️ <b>Новый вариант для {esc(order['name'])}</b>{gift}\n"
+        f"{meta['icon']} {meta['title']}\n{'─' * 25}\n\n",
+        kb,
     )
 
-    safe_send(
-        chat_id,
-        f"✍️ <b>Письмо для {esc(order['name'])}</b>{gift}\n"
-        f"{meta['icon']} {meta['title']} · {meta['length']}\n\n"
-        f"Вопрос:\n{esc(order['question'])}\n\n"
-        "Пришли текст письма одним сообщением. /cancel — отмена.",
-        markup=kb,
-    )
 
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm:write:"))
-def admin_write_cb(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm:regen:"))
+def admin_regen_cb(call):
     if call.message.chat.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Недоступно")
         return
-    start_writing(call.message.chat.id, call.data.split(":", 2)[2])
-    bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id, "Перегенерирую…")
+    admin_regenerate(call.message.chat.id, call.data.split(":", 2)[2])
 
 
 @bot.message_handler(commands=["letter"])
@@ -1516,23 +1534,53 @@ def admin_letter_cmd(message):
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Формат: /letter ALI-1234567890")
         return
-    start_writing(message.chat.id, parts[1].strip())
+    admin_regenerate(message.chat.id, parts[1].strip())
 
 
 @bot.message_handler(func=lambda m: admin_only(m) and (m.text or "").startswith("/write_"))
 def admin_write_shortcut(message):
     order_id = message.text[len("/write_"):].replace("_", "-")
-    start_writing(message.chat.id, order_id)
+    admin_regenerate(message.chat.id, order_id)
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "adm:cancel_write")
-def admin_cancel_write(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm:send_regen:"))
+def admin_send_regen(call):
     if call.message.chat.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Недоступно")
         return
+    order_id = call.data.split(":", 2)[2]
+    st = STATES.get(ADMIN_ID) or {}
+    draft = st.get("draft")
+    if not draft or st.get("order_id") != order_id:
+        bot.answer_callback_query(call.id, "Черновик потерялся, сделай новый")
+        return
+
+    order = get_order(order_id)
+    if not order:
+        bot.answer_callback_query(call.id, "Заказ не найден")
+        return
+
+    order["letter_text"] = draft
+    order["resent_at"] = now_msk().isoformat()
+    save_order(order)
     STATES.pop(ADMIN_ID, None)
-    bot.answer_callback_query(call.id, "Отменено")
-    bot.send_message(ADMIN_ID, "Написание отменено.", reply_markup=kb_admin())
+    bot.answer_callback_query(call.id, "Отправляю…")
+
+    try:
+        safe_draft = esc(draft)
+        if len(safe_draft) <= 3900:
+            bot.send_message(order["chat_id"], safe_draft, parse_mode="HTML")
+        else:
+            for i in range(0, len(draft), 3800):
+                bot.send_message(order["chat_id"], draft[i:i + 3800])
+        bot.send_message(
+            order["chat_id"],
+            "Уточнение к письму — выше. Если откликнулось, поставь оценку в кабинете.",
+        )
+        bot.send_message(ADMIN_ID, f"✅ Переслано: {order['name']} · {order_id}")
+    except Exception as exc:
+        log.error("resend letter failed %s: %s", order_id, exc)
+        bot.send_message(ADMIN_ID, f"❌ Не доставлено: {exc}")
 
 
 @bot.message_handler(func=lambda m: admin_only(m) and m.text == "👤 Мой кабинет")
@@ -1546,57 +1594,6 @@ def admin_cabinet(message):
 def admin_cancel(message):
     STATES.pop(message.chat.id, None)
     bot.send_message(message.chat.id, "Отменено.")
-
-
-@bot.message_handler(
-    func=lambda m: admin_only(m)
-    and STATES.get(m.chat.id, {}).get("step") == "admin_write"
-    and m.content_type == "text"
-)
-def admin_write_receive(message):
-    chat_id = message.chat.id
-    order_id = STATES[chat_id]["order_id"]
-    order = get_order(order_id)
-    STATES.pop(chat_id, None)
-
-    if not order:
-        bot.send_message(chat_id, "Заказ пропал. Проверь список.")
-        return
-
-    letter = message.text
-    order["letter_text"] = letter
-    order["status"] = "done"
-    order["delivered_at"] = now_msk().isoformat()
-    save_order(order)
-
-    meta = FORMAT_META.get(order["format"], {"icon": "•", "title": order["format"]})
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    kb.row(
-        *[
-            types.InlineKeyboardButton("⭐" * i, callback_data=f"rate:{order_id}:{i}")
-            for i in range(1, 6)
-        ]
-    )
-    kb.add(types.InlineKeyboardButton("👤 В кабинет", callback_data="cab:home"))
-
-    header = f"📬 <b>Твоё письмо готово</b>\n{meta['icon']} {meta['title']}\n\n"
-    try:
-        safe_letter = esc(letter)
-        if len(header) + len(safe_letter) <= 3900:
-            bot.send_message(order["chat_id"], header + safe_letter, parse_mode="HTML")
-        else:
-            bot.send_message(order["chat_id"], header, parse_mode="HTML")
-            for i in range(0, len(letter), 3800):
-                bot.send_message(order["chat_id"], letter[i:i + 3800])
-        bot.send_message(
-            order["chat_id"],
-            "Если откликнулось — поставь оценку. Если нет — напиши, перепишу.",
-            reply_markup=kb,
-        )
-        bot.send_message(chat_id, f"✅ Отправлено: {order['name']} · {order_id}")
-    except Exception as exc:
-        log.error("send letter failed %s: %s", order_id, exc)
-        bot.send_message(chat_id, f"❌ Не доставлено: {exc}\nПисьмо сохранено в кабинете клиента.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1635,90 +1632,10 @@ def send_long(chat_id, text, prefix="", markup=None):
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ai:analyze:"))
-def ai_analyze(call):
-    if not ai_guard(call):
-        bot.answer_callback_query(call.id, "Недоступно")
-        return
-    order_id = call.data.split(":", 2)[2]
-    order = get_order(order_id)
-    if not order:
-        bot.answer_callback_query(call.id, "Заказ не найден")
-        return
-
-    bot.answer_callback_query(call.id, "Разбираю…")
-    bot.send_chat_action(ADMIN_ID, "typing")
-    card = client_card(order["chat_id"], exclude_order=order_id)
-    result = AI.analyze_question(order["question"], order["format"], card)
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✏️ Теперь черновик",
-                                      callback_data=f"ai:draft:{order_id}"))
-    send_long(ADMIN_ID, result, f"🔍 РАЗБОР · {order['name']}\n\n", kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ai:draft:"))
-def ai_draft(call):
-    if not ai_guard(call):
-        bot.answer_callback_query(call.id, "Недоступно")
-        return
-    order_id = call.data.split(":", 2)[2]
-    order = get_order(order_id)
-    if not order:
-        bot.answer_callback_query(call.id, "Заказ не найден")
-        return
-
-    bot.answer_callback_query(call.id, "Пишу черновик, 20–40 сек…")
-    bot.send_chat_action(ADMIN_ID, "typing")
-
-    profile = get_client(order["chat_id"]) or {}
-    card = client_card(order["chat_id"], exclude_order=order_id)
-    draft = AI.draft_letter(
-        order["question"], order["format"],
-        card=card, notes=profile.get("notes", ""),
-    )
-
-    # черновик остаётся в состоянии, чтобы можно было взять как основу
-    st = STATES.get(ADMIN_ID) or {}
-    if st.get("order_id") == order_id:
-        st["draft"] = draft
-        STATES[ADMIN_ID] = st
-
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🔁 Другой вариант",
-                                      callback_data=f"ai:draft:{order_id}"))
-    kb.add(types.InlineKeyboardButton("📋 Взять как основу",
-                                      callback_data=f"ai:use:{order_id}"))
-    send_long(
-        ADMIN_ID, draft,
-        f"✏️ ЧЕРНОВИК · {order['name']} · {order['format']}\n"
-        f"{'─' * 25}\n\n", kb,
-    )
-    bot.send_message(
-        ADMIN_ID,
-        "⚠️ Это черновик для тебя. Клиенту ничего не ушло.\n"
-        "Правь и присылай свой текст — он и уйдёт клиенту.",
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ai:use:"))
-def ai_use_draft(call):
-    """Отправляет черновик отдельным сообщением для копирования."""
-    if call.message.chat.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Недоступно")
-        return
-    order_id = call.data.split(":", 2)[2]
-    st = STATES.get(ADMIN_ID) or {}
-    draft = st.get("draft")
-    if not draft or st.get("order_id") != order_id:
-        bot.answer_callback_query(call.id, "Черновик потерялся, сделай новый")
-        return
-    bot.answer_callback_query(call.id, "Скопируй, поправь и пришли")
-    bot.send_message(
-        ADMIN_ID,
-        "Ниже текст без разметки — скопируй, поправь и пришли обратно:",
-    )
-    for i in range(0, len(draft), 3800):
-        bot.send_message(ADMIN_ID, draft[i:i + 3800])
+def ai_analyze_legacy(call):
+    """Совместимость со старыми уведомлениями — письма теперь генерируются
+    автоматически, разбор больше не нужен как отдельный шаг."""
+    bot.answer_callback_query(call.id, "Устарело — используй «Перегенерировать»")
 
 
 @bot.message_handler(func=lambda m: admin_only(m) and m.text == "🤖 Помощник")
@@ -1736,11 +1653,11 @@ def ai_menu(message):
         message.chat.id,
         "🤖 <b>Помощник</b>\n\n"
         "Где он работает:\n"
-        "· кнопки «Разобрать вопрос» и «Черновик» при написании письма\n"
+        "· диагностика, зеркало и письмо клиенту — автоматически\n"
+        "· «🔁 Перегенерировать и переслать» в уведомлении об оплате\n"
         "· метки для карточки клиента\n"
         "· черновик ответа в поддержку\n"
-        "· сводка по заказам\n\n"
-        "Письма клиентам он не отправляет — только готовит для тебя.",
+        "· сводка по заказам",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -1796,7 +1713,7 @@ def ai_digest(call):
         "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else "—",
         "repeat": len([c for c, n in by_client.items() if n > 1]),
     }
-    questions = [o.get("question", "") for o in orders]
+    questions = [order_summary(o) for o in orders]
 
     result = AI.weekly_digest(stats, questions)
     send_long(ADMIN_ID, result, f"📊 СВОДКА ЗА {days} ДНЕЙ\n{'─' * 25}\n\n")
@@ -1809,16 +1726,14 @@ def ai_tags(call):
         bot.answer_callback_query(call.id, "Недоступно")
         return
     target = int(call.data.split(":", 2)[2])
-    orders = [o for o in client_orders(target) if o.get("question")]
+    orders = [o for o in client_orders(target) if o.get("answers")]
     if not orders:
         bot.answer_callback_query(call.id, "Нет заказов для анализа")
         return
 
     bot.answer_callback_query(call.id, "Смотрю историю…")
     bot.send_chat_action(ADMIN_ID, "typing")
-    profile = get_client(target) or {}
-    result = AI.suggest_tags([o["question"] for o in orders],
-                             profile.get("notes", ""))
+    result = AI.suggest_tags([order_summary(o) for o in orders])
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🏷 Выставить метки",
                                       callback_data=f"card:tags:{target}"))
@@ -1948,22 +1863,22 @@ def admin_export(message):
         ws = wb.active
         ws.title = "Заказы"
         ws.append([
-            "ID", "Клиент", "@username", "Формат", "Цена, ₽",
-            "Статус", "Оценка", "Создан", "Оплачен", "Отправлен", "Вопрос",
+            "ID", "Клиент", "@username", "Боль", "Цена, ₽",
+            "Статус", "Оценка", "Создан", "Оплачен", "Отправлен", "Ответы",
         ])
         for o in orders:
             ws.append([
                 o.get("order_id"),
                 o.get("name"),
                 o.get("username"),
-                o.get("format"),
+                pain_meta(o)["title"],
                 o.get("price_rub"),
                 STATUS_LABEL.get(o.get("status"), ("", o.get("status", "")))[1],
                 o.get("rating") or "",
                 fmt_dt(o.get("created_at")),
                 fmt_dt(o.get("paid_at")),
                 fmt_dt(o.get("delivered_at")),
-                (o.get("question") or "")[:500],
+                order_summary(o, limit=500),
             ])
         for col, width in zip("ABCDEFGHIJK", [20, 20, 16, 12, 10, 16, 8, 16, 16, 16, 60]):
             ws.column_dimensions[col].width = width
