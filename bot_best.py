@@ -67,6 +67,7 @@ PAIN_META = {
     "loneliness": {"icon": "🌙", "title": "Одиночество"},
     "fear":       {"icon": "🌫", "title": "Страх"},
     "unspoken":   {"icon": "💭", "title": "Недосказанность"},
+    "other":      {"icon": "✍️", "title": "Своя история"},
 }
 
 REVIEWS = [
@@ -435,9 +436,10 @@ def order_start(message):
 def start_pain(chat_id, pain_key, gift_for=None):
     if pain_key not in PAIN_META:
         return
+    is_other = pain_key == "other"
     anketa_id = new_anketa_id()
     STATES[chat_id] = {
-        "step": "diag_q1",
+        "step": "diag_other_text" if is_other else "diag_q1",
         "anketa_id": anketa_id,
         "pain": pain_key,
         "answers": [],
@@ -456,11 +458,50 @@ def start_pain(chat_id, pain_key, gift_for=None):
         "updated_at": now_msk().isoformat(),
     })
 
+    if is_other:
+        bot.send_message(
+            chat_id,
+            "Опиши, что тебя тревожит — максимально подробно, своими словами.\n\n"
+            "Что происходит? Что сейчас чувствуешь? Что хочешь понять или услышать "
+            "в ответ — чем подробнее, тем точнее выйдет письмо.",
+        )
+        return
+
     pain_title = PAIN_META[pain_key]["title"]
     bot.send_chat_action(chat_id, "typing")
     question = AI.diagnostic_question(pain_title, []) if (AI and AI.available()) else \
         "Расскажи, что сейчас происходит — своими словами, как получится."
     STATES[chat_id]["q1"] = question
+    bot.send_message(chat_id, question)
+
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_other_text"
+    and m.content_type == "text"
+)
+def diag_receive_other_text(message):
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    if len(text) < 15:
+        bot.send_message(
+            chat_id,
+            "Опиши чуть подробнее — хотя бы несколько предложений, чтобы я поняла контекст.",
+        )
+        return
+    if len(text) > 2000:
+        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
+        return
+
+    state = STATES[chat_id]
+    state["answers"] = [text]
+    state["history"] = [("Что тебя тревожит?", text)]
+    state["step"] = "diag_q2"
+    save_anketa_update(state, answers=[text])
+
+    bot.send_chat_action(chat_id, "typing")
+    question = AI.diagnostic_question("своя история", state["history"]) if (AI and AI.available()) else \
+        "А если заглянуть чуть глубже — с чем это связано сильнее всего?"
+    state["q2"] = question
     bot.send_message(chat_id, question)
 
 
