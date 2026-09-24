@@ -60,6 +60,8 @@ MAX_PENDING = 1
 BACKUP_EVERY_HOURS = int(os.getenv("BACKUP_EVERY_HOURS", "168"))
 
 LETTER_PRICE_RUB = 299
+# сколько уточняющих вопросов задаём перед зеркалом и письмом
+DIAG_QUESTIONS_TOTAL = 5
 
 PAIN_META = {
     "breakup":    {"icon": "💔", "title": "Расставание"},
@@ -433,17 +435,24 @@ def order_start(message):
     ask_diagnostic_start(message.chat.id)
 
 
+def pain_title_for(state):
+    if state.get("pain") == "other":
+        return "своя история"
+    return PAIN_META[state["pain"]]["title"]
+
+
 def start_pain(chat_id, pain_key, gift_for=None):
     if pain_key not in PAIN_META:
         return
     is_other = pain_key == "other"
     anketa_id = new_anketa_id()
     STATES[chat_id] = {
-        "step": "diag_other_text" if is_other else "diag_q1",
+        "step": "diag_other_text" if is_other else "diag_q",
         "anketa_id": anketa_id,
         "pain": pain_key,
         "answers": [],
         "history": [],
+        "q_index": 0,
         "gift_for": gift_for,
     }
     save_anketa({
@@ -467,118 +476,27 @@ def start_pain(chat_id, pain_key, gift_for=None):
         )
         return
 
-    pain_title = PAIN_META[pain_key]["title"]
-    bot.send_chat_action(chat_id, "typing")
-    question = AI.diagnostic_question(pain_title, []) if (AI and AI.available()) else \
-        "Расскажи, что сейчас происходит — своими словами, как получится."
-    STATES[chat_id]["q1"] = question
-    bot.send_message(chat_id, question)
+    ask_next_question(chat_id)
 
 
-@bot.message_handler(
-    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_other_text"
-    and m.content_type == "text"
-)
-def diag_receive_other_text(message):
-    chat_id = message.chat.id
-    text = (message.text or "").strip()
-    if len(text) < 15:
-        bot.send_message(
-            chat_id,
-            "Опиши чуть подробнее — хотя бы несколько предложений, чтобы я поняла контекст.",
-        )
-        return
-    if len(text) > 2000:
-        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
-        return
-
+def ask_next_question(chat_id):
+    """Задаёт очередной уточняющий вопрос (в пределах DIAG_QUESTIONS_TOTAL)."""
     state = STATES[chat_id]
-    state["answers"] = [text]
-    state["history"] = [("Что тебя тревожит?", text)]
-    state["step"] = "diag_q2"
-    save_anketa_update(state, answers=[text])
-
-    bot.send_chat_action(chat_id, "typing")
-    question = AI.diagnostic_question("своя история", state["history"]) if (AI and AI.available()) else \
-        "А если заглянуть чуть глубже — с чем это связано сильнее всего?"
-    state["q2"] = question
-    bot.send_message(chat_id, question)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pain:"))
-def order_pain_chosen(call):
-    chat_id = call.message.chat.id
-    key = call.data.split(":", 1)[1]
-    bot.answer_callback_query(call.id)
-    start_pain(chat_id, key)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("giftpain:"))
-def gift_pain_chosen(call):
-    chat_id = call.message.chat.id
-    key = call.data.split(":", 1)[1]
-    state = STATES.get(chat_id) or {}
-    gift_for = state.get("gift_for")
-    bot.answer_callback_query(call.id)
-    if not gift_for:
-        bot.send_message(chat_id, "Начни заново: «🎁 Подарочное письмо».")
-        return
-    start_pain(chat_id, key, gift_for=gift_for)
-
-
-# ─────────────────────────────────────────────────────────────
-# ДИАГНОСТИКА: ШАГ 2 — ДВА УТОЧНЯЮЩИХ ВОПРОСА
-# ─────────────────────────────────────────────────────────────
-
-@bot.message_handler(
-    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_q1"
-    and m.content_type == "text"
-)
-def diag_receive_answer_1(message):
-    chat_id = message.chat.id
-    answer = (message.text or "").strip()
-    if len(answer) < 2:
-        bot.send_message(chat_id, "Скажи чуть подробнее — хотя бы пару слов.")
-        return
-    if len(answer) > 2000:
-        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
-        return
-
-    state = STATES[chat_id]
-    state["answers"] = [answer]
-    state["history"] = [(state.get("q1", ""), answer)]
-    state["step"] = "diag_q2"
-    save_anketa_update(state, answers=[answer])
-
-    pain_title = PAIN_META[state["pain"]]["title"]
+    pain_title = pain_title_for(state)
     bot.send_chat_action(chat_id, "typing")
     question = AI.diagnostic_question(pain_title, state["history"]) if (AI and AI.available()) else \
-        "А если заглянуть чуть глубже — с чем это связано сильнее всего?"
-    state["q2"] = question
+        "Расскажи чуть больше — своими словами, как получится."
+    state["q_index"] += 1
+    state["current_q"] = question
+    state["step"] = "diag_q"
     bot.send_message(chat_id, question)
 
 
-@bot.message_handler(
-    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_q2"
-    and m.content_type == "text"
-)
-def diag_receive_answer_2(message):
-    chat_id = message.chat.id
-    answer = (message.text or "").strip()
-    if len(answer) < 2:
-        bot.send_message(chat_id, "Скажи чуть подробнее — хотя бы пару слов.")
-        return
-    if len(answer) > 2000:
-        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
-        return
-
-    state = STATES[chat_id]
-    answers = state["answers"] + [answer]
-    state["answers"] = answers
+def finish_diagnostics(chat_id, state):
+    """Зеркало + письмо + paywall — после того как собраны все ответы."""
     state["step"] = "generating"
-    save_anketa_update(state, answers=answers)
-
-    pain_title = PAIN_META[state["pain"]]["title"]
+    pain_title = pain_title_for(state)
+    answers = state["answers"]
     bot.send_chat_action(chat_id, "typing")
 
     if AI and AI.available():
@@ -610,6 +528,85 @@ def diag_receive_answer_2(message):
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_other_text"
+    and m.content_type == "text"
+)
+def diag_receive_other_text(message):
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    if len(text) < 15:
+        bot.send_message(
+            chat_id,
+            "Опиши чуть подробнее — хотя бы несколько предложений, чтобы я поняла контекст.",
+        )
+        return
+    if len(text) > 2000:
+        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
+        return
+
+    state = STATES[chat_id]
+    state["answers"] = [text]
+    state["history"] = [("Что тебя тревожит?", text)]
+    state["q_index"] = 1
+    save_anketa_update(state, answers=[text])
+
+    if state["q_index"] < DIAG_QUESTIONS_TOTAL:
+        ask_next_question(chat_id)
+    else:
+        finish_diagnostics(chat_id, state)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pain:"))
+def order_pain_chosen(call):
+    chat_id = call.message.chat.id
+    key = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    start_pain(chat_id, key)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("giftpain:"))
+def gift_pain_chosen(call):
+    chat_id = call.message.chat.id
+    key = call.data.split(":", 1)[1]
+    state = STATES.get(chat_id) or {}
+    gift_for = state.get("gift_for")
+    bot.answer_callback_query(call.id)
+    if not gift_for:
+        bot.send_message(chat_id, "Начни заново: «🎁 Подарочное письмо».")
+        return
+    start_pain(chat_id, key, gift_for=gift_for)
+
+
+# ─────────────────────────────────────────────────────────────
+# ДИАГНОСТИКА: УТОЧНЯЮЩИЕ ВОПРОСЫ
+# ─────────────────────────────────────────────────────────────
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "diag_q"
+    and m.content_type == "text"
+)
+def diag_receive_answer(message):
+    chat_id = message.chat.id
+    answer = (message.text or "").strip()
+    if len(answer) < 2:
+        bot.send_message(chat_id, "Скажи чуть подробнее — хотя бы пару слов.")
+        return
+    if len(answer) > 2000:
+        bot.send_message(chat_id, "Слишком длинно. Сократи до 2000 знаков, пожалуйста.")
+        return
+
+    state = STATES[chat_id]
+    state["answers"] = state["answers"] + [answer]
+    state["history"] = state["history"] + [(state.get("current_q", ""), answer)]
+    save_anketa_update(state, answers=state["answers"])
+
+    if state["q_index"] < DIAG_QUESTIONS_TOTAL:
+        ask_next_question(chat_id)
+    else:
+        finish_diagnostics(chat_id, state)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "letter:cancel")
