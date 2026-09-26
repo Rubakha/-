@@ -410,13 +410,14 @@ def cmd_start(message):
 
 def ask_diagnostic_start(chat_id, gift_for=None):
     if pending_count(chat_id) >= MAX_PENDING:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
+        pending = pending_orders(chat_id)[0]
         bot.send_message(
             chat_id,
-            "⏳ У тебя уже есть неоплаченный заказ.\n"
-            "Заверши или отмени его в кабинете — и вернёмся к новому.",
-            reply_markup=kb,
+            "⏳ У тебя уже есть неоплаченное письмо — оно готово и ждёт.\n"
+            f"Заказ <code>{pending['order_id']}</code>\n\n"
+            "Можно оплатить его или отменить и начать новое.",
+            parse_mode="HTML",
+            reply_markup=pending_markup(pending["order_id"]),
         )
         return
 
@@ -664,32 +665,37 @@ def order_create(call):
     }
     save_order(order)
     save_anketa_update(state, order_id=order_id)
+    bot.answer_callback_query(call.id)
 
+    if send_order_invoice(chat_id, order):
+        notify_admin_new_order(order)
+
+
+def send_order_invoice(chat_id, order):
+    """Отправляет окно оплаты для заказа. Возвращает True при успехе."""
+    order_id = order["order_id"]
     if not YOOKASSA_PROVIDER_TOKEN:
-        bot.answer_callback_query(call.id)
         bot.send_message(
             chat_id,
             "⚠️ Оплата временно недоступна. Напиши в «❓ Помощь».",
         )
         log.error("order %s: YOOKASSA_PROVIDER_TOKEN не задан", order_id)
-        return
+        return False
     try:
-        pain_title = PAIN_META[state["pain"]]["title"]
         bot.send_invoice(
             chat_id=chat_id,
-            title=f"Письмо от Алисы · {pain_title}",
+            title=f"Письмо от Алисы · {pain_meta(order)['title']}",
             description=f"Целиком, сразу после оплаты. Заказ {order_id}.",
             invoice_payload=order_id,
             provider_token=YOOKASSA_PROVIDER_TOKEN,
             currency="RUB",
-            prices=[LabeledPrice(label="Письмо", amount=LETTER_PRICE_RUB * 100)],  # в копейках
+            prices=[LabeledPrice(label="Письмо", amount=order["price_rub"] * 100)],  # в копейках
             need_email=True,
             send_email_to_provider=True,  # ЮKassa требует чек 54-ФЗ
         )
-        bot.answer_callback_query(call.id)
+        return True
     except Exception as exc:
         log.error("invoice error %s: %s", order_id, exc)
-        bot.answer_callback_query(call.id)
         bot.send_message(
             chat_id,
             "⚠️ Не смог открыть окно оплаты.\n"
@@ -697,9 +703,46 @@ def order_create(call):
             "Напиши в «❓ Помощь» — разберёмся вручную.",
             parse_mode="HTML",
         )
-        return
+        return False
 
-    notify_admin_new_order(order)
+
+def pending_orders(chat_id):
+    return [o for o in client_orders(chat_id) if o.get("status") == "pending"]
+
+
+def pending_markup(order_id):
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(
+        f"💳 Оплатить {LETTER_PRICE_RUB}₽", callback_data=f"cab:pay:{order_id}"
+    ))
+    kb.add(types.InlineKeyboardButton(
+        "🗑 Отменить и начать заново", callback_data=f"cab:cancel:{order_id}"
+    ))
+    return kb
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cab:pay:"))
+def cabinet_pay(call):
+    chat_id = call.message.chat.id
+    order = get_order(call.data.split(":", 2)[2])
+    if not order or order.get("chat_id") != chat_id or order.get("status") != "pending":
+        bot.answer_callback_query(call.id, "Заказ уже недоступен")
+        return
+    bot.answer_callback_query(call.id)
+    send_order_invoice(chat_id, order)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cab:cancel:"))
+def cabinet_cancel(call):
+    chat_id = call.message.chat.id
+    order = get_order(call.data.split(":", 2)[2])
+    if not order or order.get("chat_id") != chat_id or order.get("status") != "pending":
+        bot.answer_callback_query(call.id, "Заказ уже недоступен")
+        return
+    order["status"] = "cancelled"
+    save_order(order)
+    bot.answer_callback_query(call.id, "Заказ отменён")
+    ask_diagnostic_start(chat_id)
 
 
 @bot.pre_checkout_query_handler(func=lambda q: True)
@@ -838,6 +881,13 @@ def cabinet_view(chat_id):
             )
 
     kb = types.InlineKeyboardMarkup(row_width=1)
+    for o in [o for o in orders if o.get("status") == "pending"][:3]:
+        kb.add(types.InlineKeyboardButton(
+            f"💳 Оплатить {o['order_id']}", callback_data=f"cab:pay:{o['order_id']}"
+        ))
+        kb.add(types.InlineKeyboardButton(
+            f"🗑 Отменить {o['order_id']}", callback_data=f"cab:cancel:{o['order_id']}"
+        ))
     for o in done[:5]:
         meta = pain_meta(o)
         kb.add(
