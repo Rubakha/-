@@ -77,6 +77,8 @@ FREE_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "assets", "50_fraz_dlya_trudnyh_razgovorov.pdf")
 # реальная статистика показывается только от этого числа настоящих оценок
 MIN_RATINGS_TO_SHOW = 5
+# более ранние заказы — тестовые от знакомых, в публичную статистику не идут
+STATS_SINCE = "2026-09-29"
 
 STATUS_LABEL = {
     "pending": ("⏳", "ждёт оплаты"),
@@ -270,7 +272,8 @@ def real_stats_line():
     """Только настоящие цифры из заказов; пусто, пока данных мало."""
     per_client = {}
     for o in reversed(all_orders()):  # от старых к новым: остаётся последняя оценка
-        if o.get("rating") and o.get("chat_id") != ADMIN_ID:
+        if (o.get("rating") and o.get("chat_id") != ADMIN_ID
+                and o.get("created_at", "") >= STATS_SINCE):
             per_client[o.get("chat_id")] = o["rating"]
     if len(per_client) < MIN_RATINGS_TO_SHOW:
         return ""
