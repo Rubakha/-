@@ -72,11 +72,11 @@ PAIN_META = {
     "other":      {"icon": "✍️", "title": "Своя история"},
 }
 
-REVIEWS = [
-    ("Мария", 5, "Письмо изменило то, как я смотрю на ситуацию."),
-    ("Иван", 5, "Очень точно. Как будто мне в голову заглянули."),
-    ("Наташа", 5, "Перечитываю третий раз. Спасибо."),
-]
+CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/alisanevskaya_diary")
+FREE_PDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "assets", "50_fraz_dlya_trudnyh_razgovorov.pdf")
+# реальная статистика показывается только от этого числа настоящих оценок
+MIN_RATINGS_TO_SHOW = 5
 
 STATUS_LABEL = {
     "pending": ("⏳", "ждёт оплаты"),
@@ -266,10 +266,17 @@ def pending_count(chat_id):
     return len([o for o in client_orders(chat_id) if o.get("status") == "pending"])
 
 
-def random_review():
-    idx = int(now_msk().timestamp()) % len(REVIEWS)
-    name, rate, text = REVIEWS[idx]
-    return f"💬 «{text}» — {name} {'⭐' * rate}"
+def real_stats_line():
+    """Только настоящие цифры из заказов; пусто, пока данных мало."""
+    per_client = {}
+    for o in reversed(all_orders()):  # от старых к новым: остаётся последняя оценка
+        if o.get("rating") and o.get("chat_id") != ADMIN_ID:
+            per_client[o.get("chat_id")] = o["rating"]
+    if len(per_client) < MIN_RATINGS_TO_SHOW:
+        return ""
+    ratings = list(per_client.values())
+    avg = round(sum(ratings) / len(ratings), 1)
+    return f"⭐ {avg} из 5 — оценки {len(ratings)} человек, получивших письмо"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -280,6 +287,7 @@ def kb_client():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add("💌 Заказать письмо", "📖 Примеры")
     kb.add("👤 Мой кабинет", "🎁 Подарочное письмо")
+    kb.add("✨ Бесплатно", "📖 Дневник Алисы")
     kb.add("❓ Помощь", "👥 Пригласить друга")
     return kb
 
@@ -393,15 +401,20 @@ def cmd_start(message):
         if inviter:
             invited = f"\nТебя пригласил(а) {esc(inviter['name'])}. 💌\n"
 
+    stats = real_stats_line()
     text = (
         f"💌 <b>Алиса Невская</b>\n\n"
         f"{greet} Я пишу письма о том, что человека держит.\n"
         f"Не советы — разговор.\n"
         f"{invited}\n"
-        f"⭐ 4.8 из 5 · письма получили 234 человека\n"
-        f"Короткий разговор — и письмо целиком, сразу. {LETTER_PRICE_RUB}₽."
+        + (f"{stats}\n" if stats else "")
+        + "Начало твоего письма — бесплатно.\n"
+        f"Целиком — {LETTER_PRICE_RUB}₽, сразу в чате."
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb_client())
+
+    if len(parts) == 2 and parts[1] == "pdf":
+        send_free_pdf(chat_id)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1075,18 +1088,85 @@ def gift_contact(message):
 def show_examples(message):
     bot.send_message(
         message.chat.id,
-        "Вот как это звучит 👇\n\n"
+        "Вот как это звучит 👇\n"
+        "<i>(демонстрационный текст, не реальный заказ)</i>\n\n"
         "─────────────────────\n"
         "<i>Ты ищешь ответ, потому что боишься ошибиться.\n"
         "Но самые живые истории получаются у тех, кто ошибался часто.\n\n"
         "Я не дам совет. Я дам разрешение — идти дальше.\n"
         "Твой ответ уже внутри, я только помогу его назвать.</i>\n"
         "─────────────────────\n\n"
-        f"{random_review()}\n\n"
-        "Короткий разговор о том, что тебя держит — и письмо целиком, сразу.",
+        "Короткий разговор о том, что тебя держит — и начало письма бесплатно.\n"
+        f"Целиком — {LETTER_PRICE_RUB}₽, сразу в чате.",
         parse_mode="HTML",
         reply_markup=kb_client(),
     )
+
+
+def send_free_pdf(chat_id):
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("📖 Дневник Алисы", url=CHANNEL_URL))
+    kb.add(types.InlineKeyboardButton("💌 Начало моего письма — бесплатно",
+                                      callback_data="free:letter"))
+    try:
+        with open(FREE_PDF_PATH, "rb") as f:
+            bot.send_document(
+                chat_id, f,
+                caption=(
+                    "Шпаргалка «50 фраз для трудных разговоров» 🤍\n\n"
+                    "Раз в месяц я её обновляю — свежая версия всегда в дневнике."
+                ),
+                reply_markup=kb,
+            )
+    except OSError as exc:
+        log.error("free pdf not sent: %s", exc)
+        bot.send_message(
+            chat_id,
+            "Шпаргалка сейчас лежит в закрепе моего дневника 👇",
+            reply_markup=kb,
+        )
+
+
+@bot.message_handler(func=lambda m: m.text == "✨ Бесплатно")
+def free_menu(message):
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("💌 Начало моего письма", callback_data="free:letter"))
+    kb.add(types.InlineKeyboardButton("📄 Шпаргалка «50 фраз»", callback_data="free:pdf"))
+    kb.add(types.InlineKeyboardButton("📖 Дневник и челлендж «7 дней — 7 слов»",
+                                      url=CHANNEL_URL))
+    bot.send_message(
+        message.chat.id,
+        "✨ <b>Бесплатно</b>\n\n"
+        "💌 <b>Начало твоего письма.</b> Пара вопросов о том, что держит, — "
+        "и я покажу, как начнётся письмо именно тебе.\n\n"
+        "📄 <b>Шпаргалка «50 фраз для трудных разговоров».</b> "
+        "Маме, папе, другу после ссоры, себе.\n\n"
+        "📖 <b>Дневник.</b> Мои записи из Петербурга и маленькие задания "
+        "«7 дней — 7 слов» каждый вечер в 20:00.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "📖 Дневник Алисы")
+def diary_link(message):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📖 Открыть дневник", url=CHANNEL_URL))
+    bot.send_message(
+        message.chat.id,
+        "Там я пишу про свои дни в Петербурге и про слова, "
+        "которые мы откладываем на потом 🤍",
+        reply_markup=kb,
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data in ("free:letter", "free:pdf"))
+def free_callbacks(call):
+    bot.answer_callback_query(call.id)
+    if call.data == "free:pdf":
+        send_free_pdf(call.message.chat.id)
+    else:
+        ask_diagnostic_start(call.message.chat.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "👥 Пригласить друга")
