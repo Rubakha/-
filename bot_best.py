@@ -31,7 +31,7 @@ log = logging.getLogger("alisa")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").rstrip("/")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "AlisaNevskaya_bot")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "alisanevskaya_letters_bot")
 PORT = int(os.getenv("PORT", "5000"))
 # Провайдер оплаты ЮKassa, подключённый боту через @BotFather -> Payments.
 YOOKASSA_PROVIDER_TOKEN = os.getenv("YOOKASSA_PROVIDER_TOKEN", "")

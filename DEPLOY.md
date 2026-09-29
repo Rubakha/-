@@ -129,7 +129,7 @@ Render перезагрузит сервис. Подожди 1–2 минуты.
 | `ADMIN_ID` | твой Telegram ID (узнай у @userinfobot) |
 | `WEBHOOK_URL` | `https://alisa-bot.onrender.com` ← будет автоматически, но впиши вручную |
 | `DATA_DIR` | `/var/data` |
-| `BOT_USERNAME` | `AlisaNevskaya_bot` ← своё имя бота |
+| `BOT_USERNAME` | `alisanevskaya_letters_bot` ← своё имя бота |
 | `BACKUP_EVERY_HOURS` | 168 |
 | `PORT` | 5000 |
 | `ANTHROPIC_API_KEY` | (опционально, если используешь Claude) |
@@ -191,7 +191,7 @@ https://alisa-bot.onrender.com/health
 
 ### 7.2. Тест бота
 
-Открой Telegram, найди своего бота в поиске или по ссылке `t.me/AlisaNevskaya_bot`
+Открой Telegram, найди своего бота в поиске или по ссылке `t.me/alisanevskaya_letters_bot`
 
 Отправь `/start`
 

@@ -15,7 +15,7 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: BOT_USERNAME
-        value: AlisaNevskaya_bot
+        value: alisanevskaya_letters_bot
       - key: PORT
         value: 5000
       - key: TG_BOT_TOKEN
