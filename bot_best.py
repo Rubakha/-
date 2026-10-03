@@ -7,6 +7,8 @@
 import os
 import json
 import logging
+import secrets
+import urllib.parse
 from datetime import datetime, timedelta
 
 import pytz
@@ -14,6 +16,9 @@ from dotenv import load_dotenv
 from flask import Flask, request
 from telebot import TeleBot, types
 from telebot.types import LabeledPrice, Update
+
+import occasions as OCC
+import postcards
 
 try:
     import ai_assistant as AI
@@ -53,6 +58,7 @@ ORDERS_DIR = os.path.join(DATA_DIR, "orders")
 CLIENTS_DIR = os.path.join(DATA_DIR, "clients")
 ANKETAS_DIR = os.path.join(DATA_DIR, "anketas")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
+GIFTS_DIR = os.path.join(DATA_DIR, "gifts")
 
 # сколько неоплаченных заказов можно держать одновременно
 MAX_PENDING = 1
@@ -96,7 +102,7 @@ STATES = {}
 # ─────────────────────────────────────────────────────────────
 
 def ensure_dirs():
-    for path in (DATA_DIR, ORDERS_DIR, CLIENTS_DIR, ANKETAS_DIR, EXPORTS_DIR):
+    for path in (DATA_DIR, ORDERS_DIR, CLIENTS_DIR, ANKETAS_DIR, EXPORTS_DIR, GIFTS_DIR):
         os.makedirs(path, exist_ok=True)
 
 
@@ -169,6 +175,11 @@ def get_anketa(anketa_id):
 def pain_meta(order_or_key):
     """Принимает order (dict) или сам ключ боли, возвращает {icon, title}."""
     key = order_or_key.get("pain") if isinstance(order_or_key, dict) else order_or_key
+    if key in OCC.PRODUCTS:
+        p = OCC.PRODUCTS[key]
+        return {"icon": p["icon"], "title": p["title"]}
+    if key == OCC.PACK["key"]:
+        return {"icon": OCC.PACK["icon"], "title": OCC.PACK["title"]}
     return PAIN_META.get(key, {"icon": "•", "title": key or "—"})
 
 
@@ -288,8 +299,8 @@ def real_stats_line():
 
 def kb_client():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add("💌 Заказать письмо", "📖 Примеры")
-    kb.add("👤 Мой кабинет", "🎁 Подарочное письмо")
+    kb.add("🎀 Письмо с открыткой", "💌 Заказать письмо")
+    kb.add("👤 Мой кабинет", "📖 Примеры")
     kb.add("✨ Бесплатно", "📖 Дневник Алисы")
     kb.add("❓ Помощь", "👥 Пригласить друга")
     return kb
@@ -397,6 +408,10 @@ def cmd_start(message):
         )
         return
 
+    if len(parts) == 2 and parts[1].startswith("g_"):
+        occ_gift_start(chat_id, parts[1][2:])
+        return
+
     greet = "Привет!" if is_new else f"С возвращением, {esc(profile['name'].split()[0])}!"
     invited = ""
     if referred_by and is_new:
@@ -418,6 +433,10 @@ def cmd_start(message):
 
     if len(parts) == 2 and parts[1] == "pdf":
         send_free_pdf(chat_id)
+    elif len(parts) == 2 and parts[1] == "occ":
+        occ_open_catalog(chat_id)
+    elif len(parts) == 2 and parts[1].startswith("occ_"):
+        occ_open_product(chat_id, parts[1][4:])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -700,8 +719,14 @@ def send_order_invoice(chat_id, order):
     try:
         bot.send_invoice(
             chat_id=chat_id,
-            title=f"Письмо от Алисы · {pain_meta(order)['title']}",
-            description=f"Целиком, сразу после оплаты. Заказ {order_id}.",
+            title=f"Письмо от Алисы · {pain_meta(order)['title']}"[:32],
+            description=(
+                f"3 письма с открыткой, без срока. Заказ {order_id}."
+                if order.get("product") == OCC.PACK["key"] else
+                f"Письмо и открытка — сразу после оплаты. Заказ {order_id}."
+                if order.get("product") else
+                f"Целиком, сразу после оплаты. Заказ {order_id}."
+            ),
             invoice_payload=order_id,
             provider_token=YOOKASSA_PROVIDER_TOKEN,
             currency="RUB",
@@ -727,9 +752,10 @@ def pending_orders(chat_id):
 
 
 def pending_markup(order_id):
+    order = get_order(order_id) or {}
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(
-        f"💳 Оплатить {LETTER_PRICE_RUB}₽", callback_data=f"cab:pay:{order_id}"
+        f"💳 Оплатить {order.get('price_rub', LETTER_PRICE_RUB)}₽", callback_data=f"cab:pay:{order_id}"
     ))
     kb.add(types.InlineKeyboardButton(
         "🗑 Отменить и начать заново", callback_data=f"cab:cancel:{order_id}"
@@ -820,6 +846,25 @@ def on_paid(message):
                 except Exception:
                     pass
 
+    if order.get("product") == OCC.PACK["key"]:
+        profile = get_client(chat_id) or {}
+        profile["credits"] = profile.get("credits", 0) + OCC.PACK["credits"]
+        write_json(client_path(chat_id), profile)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🎀 Написать первое письмо", callback_data="occ:catalog"))
+        bot.send_message(chat_id, f"✅ Оплата прошла. В твоём наборе: {profile['credits']} письма с открыткой 🎁\n"
+                                  "Выбирай повод — оплачивать больше не нужно.", reply_markup=kb)
+        notify_admin_paid(order)
+        return
+
+    if order.get("product") in OCC.PRODUCTS:
+        bot.send_message(chat_id, f"✅ Оплата прошла · заказ <code>{order_id}</code>\n"
+                                  + (f"Чек придёт на {esc(order['email'])}" if order.get("email") else ""),
+                         parse_mode="HTML")
+        occ_deliver(chat_id, order)
+        notify_admin_paid(order)
+        return
+
     meta = pain_meta(order)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
@@ -880,6 +925,8 @@ def cabinet_view(chat_id):
     ]
     if profile.get("bonus_rub"):
         lines.append(f"Бонусов за друзей: {profile['bonus_rub']}₽")
+    if profile.get("credits"):
+        lines.append(f"🎁 Писем с открыткой в наборе: {profile['credits']}")
     lines.append("")
 
     if not orders:
@@ -904,7 +951,7 @@ def cabinet_view(chat_id):
         kb.add(types.InlineKeyboardButton(
             f"🗑 Отменить {o['order_id']}", callback_data=f"cab:cancel:{o['order_id']}"
         ))
-    for o in done[:5]:
+    for o in [o for o in done if o.get("product") != OCC.PACK["key"]][:5]:
         meta = pain_meta(o)
         kb.add(
             types.InlineKeyboardButton(
@@ -913,7 +960,7 @@ def cabinet_view(chat_id):
             )
         )
     kb.add(types.InlineKeyboardButton("💌 Новое письмо", callback_data="cab:new"))
-    kb.add(types.InlineKeyboardButton("🎁 Подарочное письмо", callback_data="gift:menu"))
+    kb.add(types.InlineKeyboardButton("🎀 Письмо с открыткой", callback_data="occ:catalog"))
     return "\n".join(lines), kb
 
 
@@ -1027,7 +1074,7 @@ GIFT_TEXT = (
 
 @bot.message_handler(func=lambda m: m.text == "🎁 Подарочное письмо")
 def gift_open(message):
-    bot.send_message(message.chat.id, GIFT_TEXT, parse_mode="HTML", reply_markup=gift_menu_markup())
+    occ_open_catalog(message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "gift:menu")
@@ -1084,6 +1131,458 @@ def gift_contact(message):
 
 
 # ─────────────────────────────────────────────────────────────
+# ПИСЬМА С ОТКРЫТКОЙ (поводы) — каталог, анкета, превью, конверт
+# ─────────────────────────────────────────────────────────────
+
+OCC_BUTTON = "🎀 Письмо с открыткой"
+
+
+def gift_path(code):
+    return os.path.join(GIFTS_DIR, f"{code}.json")
+
+
+def occ_catalog_markup():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton(f"{p['icon']} {p['title']} · {p['price']}₽",
+                                   callback_data=f"occ:p:{key}")
+        for key in OCC.CATALOG_ORDER for p in [OCC.PRODUCTS[key]]
+    ]
+    for i in range(0, len(buttons), 2):
+        kb.row(*buttons[i:i + 2])
+    kb.add(types.InlineKeyboardButton(
+        f"{OCC.PACK['icon']} {OCC.PACK['title']} · {OCC.PACK['price']}₽", callback_data="occ:pack"))
+    kb.add(types.InlineKeyboardButton(
+        f"💭 Глубокое письмо о том, что держит · {LETTER_PRICE_RUB}₽", callback_data="gift:menu"))
+    return kb
+
+
+def occ_catalog_text(chat_id):
+    credits = (get_client(chat_id) or {}).get("credits", 0)
+    credit_line = f"\n🎁 У тебя в наборе: <b>{credits}</b> — любое письмо без оплаты.\n" if credits else ""
+    return (
+        "🎀 <b>Письма с открыткой</b>\n\n"
+        "Ты рассказываешь пару живых деталей — я пишу письмо, которое звучит как ты "
+        "в свой лучший момент, и оформляю открытку с именем.\n\n"
+        "✉️ Получатель открывает его по ссылке-конверту — как настоящий подарок. "
+        "А ты узнаешь, когда письмо вскроют.\n\n"
+        "Начало письма и открытку-превью видно до оплаты.\n"
+        f"{credit_line}\n"
+        "Кому пишем?"
+    )
+
+
+def occ_open_catalog(chat_id):
+    STATES.pop(chat_id, None)
+    bot.send_message(chat_id, occ_catalog_text(chat_id), parse_mode="HTML",
+                     reply_markup=occ_catalog_markup())
+
+
+@bot.message_handler(func=lambda m: m.text == OCC_BUTTON)
+def occ_catalog_msg(message):
+    occ_open_catalog(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:catalog")
+def occ_catalog_cb(call):
+    bot.answer_callback_query(call.id)
+    safe_edit(call, occ_catalog_text(call.message.chat.id), occ_catalog_markup())
+
+
+def occ_product_text(key):
+    p = OCC.PRODUCTS[key]
+    return (
+        f"{p['icon']} <b>{p['title']}</b> — {p['price']}₽\n\n"
+        f"{p['pitch']}\n\n"
+        "<b>Что внутри:</b>\n"
+        "✍️ письмо по твоим деталям — не шаблон\n"
+        "🖼 открытка с именем и твоей подписью\n"
+        "✉️ ссылка-конверт: получатель «вскрывает» письмо, ты узнаёшь об этом\n\n"
+        f"Несколько коротких вопросов — минуты 3. Начало письма и превью открытки — бесплатно."
+    )
+
+
+def occ_open_product(chat_id, key, call=None):
+    if key not in OCC.PRODUCTS:
+        return occ_open_catalog(chat_id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✍️ Начать", callback_data=f"occ:go:{key}"))
+    kb.add(types.InlineKeyboardButton("↩️ Все письма", callback_data="occ:catalog"))
+    if call:
+        safe_edit(call, occ_product_text(key), kb)
+    else:
+        bot.send_message(chat_id, occ_product_text(key), parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("occ:p:"))
+def occ_product_cb(call):
+    bot.answer_callback_query(call.id)
+    occ_open_product(call.message.chat.id, call.data.split(":", 2)[2], call)
+
+
+def occ_questions(key):
+    p = OCC.PRODUCTS[key]
+    qs = []
+    for qkey, text in p["questions"]:
+        if qkey == "tone" and p.get("tone"):
+            continue
+        if qkey == "sign" and p.get("sign"):
+            continue
+        qs.append((qkey, text))
+    return qs
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("occ:go:"))
+def occ_go(call):
+    chat_id = call.message.chat.id
+    key = call.data.split(":", 2)[2]
+    bot.answer_callback_query(call.id)
+    if key not in OCC.PRODUCTS:
+        return occ_open_catalog(chat_id)
+    if pending_count(chat_id) >= MAX_PENDING:
+        pending = pending_orders(chat_id)[0]
+        bot.send_message(
+            chat_id,
+            "⏳ У тебя уже есть неоплаченное письмо — оно готово и ждёт.\n"
+            f"Заказ <code>{pending['order_id']}</code>\n\nМожно оплатить его или отменить.",
+            parse_mode="HTML", reply_markup=pending_markup(pending["order_id"]))
+        return
+    STATES[chat_id] = {"step": "occ_q", "product": key, "idx": 0, "qa": [], "data": {}}
+    p = OCC.PRODUCTS[key]
+    bot.send_message(chat_id, f"{p['icon']} Пишем: <b>{p['title']}</b>. Поехали 🤍",
+                     parse_mode="HTML")
+    occ_ask(chat_id)
+
+
+def occ_ask(chat_id):
+    state = STATES[chat_id]
+    qs = occ_questions(state["product"])
+    if state["idx"] >= len(qs):
+        return occ_finish(chat_id)
+    qkey, text = qs[state["idx"]]
+    state["qkey"], state["qtext"] = qkey, text
+    if qkey == "tone":
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(*[types.InlineKeyboardButton(label, callback_data=f"occ:tone:{t}")
+                 for t, label in OCC.TONES.items()])
+        bot.send_message(chat_id, text, reply_markup=kb)
+    else:
+        bot.send_message(chat_id, text)
+
+
+def occ_store(chat_id, value):
+    state = STATES[chat_id]
+    state["data"][state["qkey"]] = value
+    if state["qkey"] != "tone":
+        state["qa"].append((state["qtext"], value))
+    state["idx"] += 1
+    occ_ask(chat_id)
+
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "occ_q" and m.content_type == "text"
+)
+def occ_answer(message):
+    chat_id = message.chat.id
+    state = STATES[chat_id]
+    text = (message.text or "").strip()
+    if state.get("qkey") == "tone":
+        bot.send_message(chat_id, "Выбери тон кнопкой выше 👆")
+        return
+    if len(text) < 1:
+        bot.send_message(chat_id, "Напиши хотя бы пару слов 🙂")
+        return
+    if len(text) > 1500:
+        bot.send_message(chat_id, "Слишком длинно — сократи до 1500 знаков, пожалуйста.")
+        return
+    occ_store(chat_id, text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("occ:tone:"))
+def occ_tone(call):
+    chat_id = call.message.chat.id
+    state = STATES.get(chat_id) or {}
+    bot.answer_callback_query(call.id)
+    if state.get("step") != "occ_q" or state.get("qkey") != "tone":
+        return
+    tone = call.data.split(":", 2)[2]
+    try:
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(chat_id, f"Тон: {OCC.TONES.get(tone, tone)}")
+    occ_store(chat_id, tone)
+
+
+def occ_finish(chat_id):
+    state = STATES[chat_id]
+    key = state["product"]
+    p = OCC.PRODUCTS[key]
+    data = state["data"]
+    name = data.get("name", "").strip()
+    sign = p.get("sign") or data.get("sign", "").strip()
+    tone = p.get("tone") or data.get("tone", "simple")
+    default_title = p["card_title"].format(name=name)[:40]
+    state["step"] = "occ_generating"
+    bot.send_message(chat_id, "✍️ Пишу… это займёт около минуты.")
+    bot.send_chat_action(chat_id, "typing")
+
+    if AI and AI.available() and hasattr(AI, "generate_occasion"):
+        res = AI.generate_occasion(p["brief"], key, state["qa"], tone, sign, default_title)
+    else:
+        res = {"letter": "[ai] Помощник выключен — письмо не сгенерировано.",
+               "card_title": default_title, "card_line": ""}
+    if res["letter"].startswith("[ai]"):
+        STATES.pop(chat_id, None)
+        bot.send_message(chat_id, "Не получилось написать письмо прямо сейчас 😔 "
+                                  "Попробуй через пару минут или напиши в «❓ Помощь».")
+        log.error("occasion generation failed: %s", res["letter"])
+        return
+
+    state.update(step="occ_paywall", letter=res["letter"], card_title=res["card_title"],
+                 card_line=res["card_line"], sign=sign, tone=tone, name=name)
+    try:
+        img = postcards.render(key, res["card_title"], res["card_line"], sign, preview=True)
+        bot.send_photo(chat_id, img, caption="Твоя открытка (превью) 🖼")
+    except Exception as exc:
+        log.error("postcard preview failed: %s", exc)
+
+    letter = res["letter"]
+    cut = max(220, int(len(letter) * 0.4))
+    preview = letter[:cut].rsplit(" ", 1)[0] + "…"
+    credits = (get_client(chat_id) or {}).get("credits", 0)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if credits:
+        kb.add(types.InlineKeyboardButton(f"🎁 Забрать по набору (осталось {credits})",
+                                          callback_data="occ:credit"))
+    kb.add(types.InlineKeyboardButton(f"🔓 Письмо и открытка целиком — {p['price']}₽",
+                                      callback_data="occ:buy"))
+    kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data="letter:cancel"))
+    bot.send_message(
+        chat_id,
+        f"{esc(preview)}\n\n🔒 Дальше — письмо целиком, чистая открытка без надписи «превью» "
+        "и ссылка-конверт для получателя.",
+        parse_mode="HTML", reply_markup=kb)
+
+
+def occ_make_order(chat_id, user, state, status="pending", price=None):
+    key = state["product"]
+    p = OCC.PRODUCTS[key]
+    profile = upsert_client(user)
+    order = {
+        "order_id": new_order_id(),
+        "chat_id": chat_id,
+        "name": profile["name"],
+        "username": profile.get("username", ""),
+        "pain": key,
+        "product": key,
+        "answers": [a for _, a in state["qa"]],
+        "qa": state["qa"],
+        "mirror_text": None,
+        "letter_text": state["letter"],
+        "card_title": state["card_title"],
+        "card_line": state["card_line"],
+        "sign": state["sign"],
+        "price_rub": p["price"] if price is None else price,
+        "status": status,
+        "is_gift": True,
+        "gift_for": state.get("name"),
+        "created_at": now_msk().isoformat(),
+        "paid_at": None,
+        "delivered_at": None,
+        "email": None,
+        "rating": None,
+    }
+    save_order(order)
+    return order
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:buy")
+def occ_buy(call):
+    chat_id = call.message.chat.id
+    state = STATES.get(chat_id) or {}
+    bot.answer_callback_query(call.id)
+    if state.get("step") != "occ_paywall":
+        safe_edit(call, f"Заказ устарел. Начни заново: «{OCC_BUTTON}».")
+        return
+    order = occ_make_order(chat_id, call.from_user, state)
+    if send_order_invoice(chat_id, order):
+        notify_admin_new_order(order)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:credit")
+def occ_credit(call):
+    chat_id = call.message.chat.id
+    state = STATES.get(chat_id) or {}
+    profile = get_client(chat_id) or {}
+    bot.answer_callback_query(call.id)
+    if state.get("step") != "occ_paywall" or profile.get("credits", 0) < 1:
+        safe_edit(call, f"Не получилось — начни заново: «{OCC_BUTTON}».")
+        return
+    profile["credits"] -= 1
+    write_json(client_path(chat_id), profile)
+    order = occ_make_order(chat_id, call.from_user, state, status="done", price=0)
+    order["paid_at"] = order["delivered_at"] = now_msk().isoformat()
+    order["paid_by"] = "credit"
+    save_order(order)
+    STATES.pop(chat_id, None)
+    bot.send_message(chat_id, f"🎁 Списано из набора. Осталось: {profile['credits']}.")
+    occ_deliver(chat_id, order)
+    notify_admin_paid(order)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:pack")
+def occ_pack(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    if pending_count(chat_id) >= MAX_PENDING:
+        pending = pending_orders(chat_id)[0]
+        bot.send_message(chat_id, "⏳ Сначала оплати или отмени неоплаченный заказ.",
+                         reply_markup=pending_markup(pending["order_id"]))
+        return
+    profile = upsert_client(call.from_user)
+    order = {
+        "order_id": new_order_id(), "chat_id": chat_id, "name": profile["name"],
+        "username": profile.get("username", ""), "pain": OCC.PACK["key"],
+        "product": OCC.PACK["key"], "answers": [], "letter_text": "",
+        "price_rub": OCC.PACK["price"], "status": "pending", "is_gift": False,
+        "created_at": now_msk().isoformat(), "paid_at": None, "delivered_at": None,
+        "email": None, "rating": None,
+    }
+    save_order(order)
+    bot.send_message(
+        chat_id,
+        f"{OCC.PACK['icon']} <b>{OCC.PACK['title']}</b>\n\n"
+        "Три любых письма с открыткой — маме, другу, любимому, на день рождения… "
+        f"Вместо {3 * OCC.price_from()}₽ — {OCC.PACK['price']}₽. "
+        "Письма из набора не сгорают: пишешь, когда появится повод.",
+        parse_mode="HTML")
+    send_order_invoice(chat_id, order)
+
+
+def occ_gift_link(order):
+    code = order.get("gift_code")
+    if not code:
+        code = secrets.token_urlsafe(6).replace("-", "x").replace("_", "y")
+        order["gift_code"] = code
+        save_order(order)
+        write_json(gift_path(code), {"order_id": order["order_id"]})
+    return f"https://t.me/{BOT_USERNAME}?start=g_{code}"
+
+
+def occ_postcard(order, preview=False):
+    return postcards.render(order["product"], order.get("card_title", ""),
+                            order.get("card_line", ""), order.get("sign", ""), preview=preview)
+
+
+def occ_deliver(chat_id, order):
+    try:
+        bot.send_photo(chat_id, occ_postcard(order), caption="🖼 Твоя открытка")
+    except Exception as exc:
+        log.error("postcard deliver failed %s: %s", order["order_id"], exc)
+    rate_kb = types.InlineKeyboardMarkup(row_width=5)
+    rate_kb.row(*[types.InlineKeyboardButton("⭐" * i, callback_data=f"rate:{order['order_id']}:{i}")
+                  for i in range(1, 6)])
+    send_long(chat_id, order["letter_text"], markup=rate_kb)
+
+    link = occ_gift_link(order)
+    share_text = f"Тебе письмо 💌 Открой конверт:"
+    share_url = ("https://t.me/share/url?url=" + urllib.parse.quote(link)
+                 + "&text=" + urllib.parse.quote(share_text))
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("📤 Отправить конверт получателю", url=share_url))
+    kb.add(types.InlineKeyboardButton("🎀 Ещё одно письмо с открыткой", callback_data="occ:catalog"))
+    bot.send_message(
+        chat_id,
+        "✉️ <b>Как подарить</b>\n\n"
+        "1. Нажми «Отправить конверт получателю» — или скопируй ссылку:\n"
+        f"<code>{link}</code>\n"
+        "Получатель откроет конверт в Telegram: сначала открытка, потом письмо. "
+        "Я сообщу тебе, когда его вскроют ✨\n\n"
+        "2. Или просто перешли ему открытку и письмо выше.",
+        parse_mode="HTML", reply_markup=kb)
+
+
+def occ_gift_start(chat_id, code):
+    ref = read_json(gift_path(code), None)
+    order = get_order(ref["order_id"]) if ref else None
+    if not order or order.get("status") != "done":
+        bot.send_message(chat_id, "Конверт не найден 😔 Возможно, ссылка скопирована не полностью.",
+                         reply_markup=kb_client())
+        return
+    who = order.get("sign") or "близкого человека"
+    name = order.get("gift_for") or ""
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✉️ Вскрыть конверт", callback_data=f"env:open:{code}"))
+    bot.send_message(
+        chat_id,
+        f"💌 {esc(name) + ', тебе' if name else 'Тебе'} письмо от <b>{esc(who)}</b>.\n\n"
+        "Внутри — открытка и несколько слов, написанных специально для тебя.",
+        parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("env:open:"))
+def occ_envelope_open(call):
+    chat_id = call.message.chat.id
+    code = call.data.split(":", 2)[2]
+    bot.answer_callback_query(call.id, "✨")
+    ref = read_json(gift_path(code), None)
+    order = get_order(ref["order_id"]) if ref else None
+    if not order:
+        bot.send_message(chat_id, "Конверт не найден 😔")
+        return
+    try:
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    try:
+        bot.send_photo(chat_id, occ_postcard(order))
+    except Exception as exc:
+        log.error("envelope postcard failed: %s", exc)
+    send_long(chat_id, order["letter_text"])
+
+    if not order.get("opened_at") and chat_id != order["chat_id"]:
+        order["opened_at"] = now_msk().isoformat()
+        order["opened_by"] = chat_id
+        save_order(order)
+        try:
+            bot.send_message(order["chat_id"],
+                             f"✨ {esc(order.get('gift_for') or 'Получатель')} только что открыл(а) твоё письмо.",
+                             parse_mode="HTML")
+        except Exception:
+            pass
+
+    sign = order.get("sign") or "отправителю"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("💌 Написать ответное письмо", callback_data="occ:catalog"))
+    kb.add(types.InlineKeyboardButton("📖 Дневник Алисы", url=CHANNEL_URL))
+    bot.send_message(
+        chat_id,
+        f"Если захочется ответить {esc(sign)} так же — я помогу подобрать слова 🤍\n\n"
+        "Я — Алиса, цифровая девушка из Петербурга. Пишу письма к поводам, "
+        "когда трудно найти слова самому.",
+        parse_mode="HTML", reply_markup=kb)
+
+
+_EXAMPLES_CACHE = []
+
+
+def occ_examples_media():
+    if not _EXAMPLES_CACHE:
+        samples = [
+            ("birthday", "С днём рождения, Катя!",
+             "Ты всё так же смеёшься громче всех — и мир от этого теплее.", "Серёжа"),
+            ("love", "Аня, это тебе",
+             "Я до сих пор помню, как ты уронила мороженое и рассмеялась.", "твой Дима"),
+            ("santa", "Миша, тебе письмо из Великого Устюга",
+             "Я видел, как ты научился кататься на велосипеде. Горжусь!", "Дед Мороз"),
+        ]
+        for key, title, line, sign in samples:
+            _EXAMPLES_CACHE.append(postcards.render(key, title, line, sign))
+    return [types.InputMediaPhoto(img) for img in _EXAMPLES_CACHE]
+
+
+# ─────────────────────────────────────────────────────────────
 # ПРИМЕРЫ, ПОМОЩЬ, ПРИГЛАШЕНИЕ
 # ─────────────────────────────────────────────────────────────
 
@@ -1104,6 +1603,14 @@ def show_examples(message):
         parse_mode="HTML",
         reply_markup=kb_client(),
     )
+    try:
+        bot.send_media_group(message.chat.id, occ_examples_media())
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🎀 Выбрать повод", callback_data="occ:catalog"))
+        bot.send_message(message.chat.id, f"А так выглядят письма с открыткой — от {OCC.price_from()}₽ 🎀",
+                         reply_markup=kb)
+    except Exception as exc:
+        log.error("examples postcards failed: %s", exc)
 
 
 def send_free_pdf(chat_id):
