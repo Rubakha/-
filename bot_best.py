@@ -425,7 +425,8 @@ def cmd_start(message):
     if is_new and "source" not in profile:
         # первая точка входа для аналитики: pdf / occ / g_<код> / ref_<id> / direct
         src = parts[1] if len(parts) == 2 else "direct"
-        profile["source"] = "gift" if src.startswith("g_") else ("ref" if src.startswith("ref_") else src[:32])
+        profile["source"] = ("gift" if src.startswith("g_") else "ref" if src.startswith("ref_")
+                             else "web" if src.startswith("w_") else src[:32])
         write_json(client_path(chat_id), profile)
 
     if chat_id == ADMIN_ID:
@@ -465,6 +466,12 @@ def cmd_start(message):
         occ_open_catalog(chat_id)
     elif len(parts) == 2 and parts[1].startswith("occ_"):
         occ_open_product(chat_id, parts[1][4:])
+    elif len(parts) == 2 and parts[1].startswith("w_"):  # переход с сайта
+        key = parts[1][2:]
+        if key in OCC.PRODUCTS:
+            occ_open_product(chat_id, key)
+        else:
+            occ_open_catalog(chat_id)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2969,9 +2976,13 @@ def fallback(message):
 # WEBHOOK / ЗАПУСК
 # ─────────────────────────────────────────────────────────────
 
-@app.route("/", methods=["GET"])
+@app.route("/ping", methods=["GET"])
 def index():
     return "Alisa bot is running", 200
+
+
+import site_pages  # noqa: E402  сайт «Письма Алисы» на том же Flask
+site_pages.register(app, DATA_DIR)
 
 
 # Ключ для /stats выводится из токена бота: локальный отчёт считает его так же,
@@ -3017,8 +3028,11 @@ def bot_stats(days=62):
             if o.get("gift_code"):
                 gifts_sent += 1
                 gifts_opened += bool(o.get("opened_at"))
+    site_views = {d: sum(v.values()) for d, v in read_json(os.path.join(DATA_DIR, "site_views.json"), {}).items()
+                  if d >= since}
     return {
         "generated_at": now_msk().isoformat(),
+        "site_views": site_views,
         "clients_total": clients_total, "paid_total": paid_total, "revenue_total": revenue_total,
         "pending": pending, "gifts_sent": gifts_sent, "gifts_opened": gifts_opened,
         "sources": sources, "products": products, "daily": dict(sorted(daily.items())),
