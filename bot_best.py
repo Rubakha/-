@@ -6,6 +6,7 @@
 
 import os
 import hashlib
+import html
 import json
 import logging
 import re
@@ -3029,6 +3030,73 @@ def stats_endpoint(key):
     if not secrets.compare_digest(key, STATS_KEY):
         return "", 404
     return bot_stats(), 200
+
+
+RSS_CHANNEL = os.getenv("RSS_CHANNEL", "alisanevskaya_diary")
+_RSS_CACHE = {"at": 0.0, "xml": ""}
+
+
+def channel_rss_items(limit=15):
+    """Посты публичного канала с t.me/s/<канал>: текст, фото, ссылка, дата."""
+    html_page = requests.get(f"https://t.me/s/{RSS_CHANNEL}", timeout=20,
+                             headers={"User-Agent": "Mozilla/5.0"}).text
+    items = []
+    for block in html_page.split('class="tgme_widget_message_wrap')[1:]:
+        pid = re.search(r'data-post="([^"]+)"', block)
+        when = re.search(r'<time datetime="([^"]+)"', block)
+        if not pid or not when:
+            continue
+        text_m = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', block, re.S)
+        raw = text_m.group(1) if text_m else ""
+        raw = re.sub(r"<br\s*/?>", "\n", raw)
+        raw = re.sub(r"<i class=\"emoji\"[^>]*><b>(.*?)</b></i>", r"\1", raw)
+        text = html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
+        photo = re.search(r"tgme_widget_message_photo_wrap[^>]*background-image:url\('([^']+)'\)", block)
+        if not text and not photo:
+            continue
+        items.append({"link": f"https://t.me/{pid.group(1)}", "date": when.group(1),
+                      "text": text, "photo": photo.group(1) if photo else None})
+    return items[-limit:]
+
+
+def build_rss():
+    from email.utils import format_datetime
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0"><channel>',
+        "<title>Дневник Алисы Невской</title>",
+        f"<link>https://t.me/{RSS_CHANNEL}</link>",
+        "<description>Когда трудно сказать важное — здесь находятся слова</description>",
+    ]
+    # только свежие посты, чтобы при подключении импорта VK не залил стену старыми
+    since = os.getenv("RSS_SINCE", "2026-10-03")
+    items = channel_rss_items()
+    fresh = [it for it in items if it["date"][:10] >= since] or items[-1:]
+    for it in reversed(fresh):
+        title = it["text"].split("\n", 1)[0][:100] or "Дневник Алисы"
+        pub = format_datetime(datetime.fromisoformat(it["date"]))
+        parts.append("<item>")
+        parts.append(f"<title>{html.escape(title)}</title>")
+        parts.append(f"<link>{it['link']}</link><guid>{it['link']}</guid><pubDate>{pub}</pubDate>")
+        parts.append(f"<description>{html.escape(it['text'])}</description>")
+        if it["photo"]:
+            parts.append(f'<enclosure url="{html.escape(it["photo"])}" type="image/jpeg" length="0"/>')
+        parts.append("</item>")
+    parts.append("</channel></rss>")
+    return "\n".join(parts)
+
+
+@app.route("/rss.xml", methods=["GET"])
+def rss_feed():
+    """RSS канала для импорта в VK (Управление → Дополнительно → RSS)."""
+    if time.time() - _RSS_CACHE["at"] > 300 or not _RSS_CACHE["xml"]:
+        try:
+            _RSS_CACHE.update(at=time.time(), xml=build_rss())
+        except Exception as exc:
+            log.error("rss build error: %s", exc)
+            if not _RSS_CACHE["xml"]:
+                return "", 503
+    return _RSS_CACHE["xml"], 200, {"Content-Type": "application/rss+xml; charset=utf-8"}
 
 
 def start_stats_server():
