@@ -3146,6 +3146,11 @@ if __name__ == "__main__":
         log.error("STORAGE NOT WRITABLE: %s", _where)
     start_autobackup()
     start_yk_poller()
+    try:
+        import vk_bridge
+        vk_bridge.start()
+    except Exception as exc:
+        log.error("vk bridge: %s", exc)
 
     if WEBHOOK_URL:
         bot.remove_webhook()
