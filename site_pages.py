@@ -187,13 +187,8 @@ GOOGLE_FILES = set()  # google<код>.html, если подтверждать S
 def verify_yandex(code):
     if code not in YANDEX_CODES:
         abort(404)
-    return ('<html>
-<head>
-<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-</head>
-'
-            f'<body>Verification: {code}</body>
-</html>')
+    return ('<html>\n<head>\n<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n</head>\n'
+            f'<body>Verification: {code}</body>\n</html>')
 
 
 def verify_google(code):
