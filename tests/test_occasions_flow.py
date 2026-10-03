@@ -116,3 +116,14 @@ text, kb = B.cabinet_view(500)
 assert "наборе: 2" in text
 B.show_examples(msg("📖 Примеры"))
 print("OK: all occasion flow checks passed,", len(SENT), "calls")
+
+# агрегаты для отчётов: без личных данных, ключ обязателен
+st = B.bot_stats()
+assert st["paid_total"] == 3 and st["revenue_total"] == 199 + 449 and st["gifts_sent"] == 2 and st["gifts_opened"] == 1, st
+assert B.get_client(500)["source"] == "occ" and st["sources"].get("occ") == 1, st["sources"]
+cl = B.app.test_client()
+assert cl.get("/stats/wrong").status_code == 404
+r = cl.get("/stats/" + B.STATS_KEY)
+assert r.status_code == 200 and r.get_json()["clients_total"] >= 2
+assert "Катя" not in r.get_data(as_text=True)
+print("OK: stats endpoint")

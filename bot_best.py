@@ -5,6 +5,7 @@
 """
 
 import os
+import hashlib
 import json
 import logging
 import re
@@ -284,7 +285,11 @@ def client_orders(chat_id):
 
 
 def new_order_id():
-    return f"ALI-{int(now_msk().timestamp())}"
+    # секунда + 3 случайные цифры: два заказа в одну секунду не затирают друг друга
+    while True:
+        order_id = f"ALI-{int(now_msk().timestamp())}{secrets.randbelow(900) + 100}"
+        if not os.path.exists(order_path(order_id)):
+            return order_id
 
 
 def new_anketa_id():
@@ -415,6 +420,12 @@ def cmd_start(message):
 
     is_new = get_client(chat_id) is None
     profile = upsert_client(message.from_user, referred_by)
+    is_new = profile is not None and profile.get("created_at", "") >= (now_msk() - timedelta(minutes=1)).isoformat()
+    if is_new and "source" not in profile:
+        # первая точка входа для аналитики: pdf / occ / g_<код> / ref_<id> / direct
+        src = parts[1] if len(parts) == 2 else "direct"
+        profile["source"] = "gift" if src.startswith("g_") else ("ref" if src.startswith("ref_") else src[:32])
+        write_json(client_path(chat_id), profile)
 
     if chat_id == ADMIN_ID:
         bot.send_message(
@@ -2962,6 +2973,71 @@ def index():
     return "Alisa bot is running", 200
 
 
+# Ключ для /stats выводится из токена бота: локальный отчёт считает его так же,
+# отдельный секрет не нужен. Наружу отдаются только агрегаты, без личных данных.
+STATS_KEY = hashlib.sha256(f"{TG_BOT_TOKEN}:stats".encode()).hexdigest()[:24]
+
+
+def bot_stats(days=62):
+    ensure_dirs()
+    since = (now_msk() - timedelta(days=days)).date().isoformat()
+    daily = {}
+
+    def day(key):
+        return daily.setdefault(key, {"new_clients": 0, "orders": 0, "paid": 0, "revenue": 0})
+
+    sources, products, clients_total, pending = {}, {}, 0, 0
+    for fname in os.listdir(CLIENTS_DIR):
+        if not fname.endswith(".json"):
+            continue
+        c = read_json(os.path.join(CLIENTS_DIR, fname), None) or {}
+        clients_total += 1
+        d = (c.get("created_at") or "")[:10]
+        if d >= since:
+            day(d)["new_clients"] += 1
+            src = c.get("source", "unknown")
+            sources[src] = sources.get(src, 0) + 1
+    revenue_total, paid_total, gifts_sent, gifts_opened = 0, 0, 0, 0
+    for o in all_orders():
+        d = (o.get("created_at") or "")[:10]
+        if d >= since:
+            day(d)["orders"] += 1
+        if o.get("status") == "pending":
+            pending += 1
+        if o.get("status") == "done":
+            paid_total += 1
+            revenue_total += o.get("price_rub", 0)
+            pd = (o.get("paid_at") or o.get("created_at") or "")[:10]
+            if pd >= since:
+                day(pd)["paid"] += 1
+                day(pd)["revenue"] += o.get("price_rub", 0)
+            key = o.get("product") or "letter"
+            products[key] = products.get(key, 0) + 1
+            if o.get("gift_code"):
+                gifts_sent += 1
+                gifts_opened += bool(o.get("opened_at"))
+    return {
+        "generated_at": now_msk().isoformat(),
+        "clients_total": clients_total, "paid_total": paid_total, "revenue_total": revenue_total,
+        "pending": pending, "gifts_sent": gifts_sent, "gifts_opened": gifts_opened,
+        "sources": sources, "products": products, "daily": dict(sorted(daily.items())),
+    }
+
+
+@app.route("/stats/<key>", methods=["GET"])
+def stats_endpoint(key):
+    if not secrets.compare_digest(key, STATS_KEY):
+        return "", 404
+    return bot_stats(), 200
+
+
+def start_stats_server():
+    """В режиме polling Flask не запущен — поднимаем его в фоне ради /health и /stats."""
+    port = int(os.getenv("STATS_PORT", "80"))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
+                     name="stats_http", daemon=True).start()
+
+
 @app.route("/health", methods=["GET"])
 def health():
     writable, where = storage_check()
@@ -3010,5 +3086,9 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=PORT)
     else:
         log.info("polling mode (WEBHOOK_URL не задан)")
+        try:
+            start_stats_server()
+        except Exception as exc:
+            log.error("stats server: %s", exc)
         bot.remove_webhook()
         bot.infinity_polling(skip_pending=True)
