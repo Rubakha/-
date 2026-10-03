@@ -179,6 +179,29 @@ def card(key):
     return send_file(path, mimetype="image/jpeg", max_age=86400)
 
 
+# коды подтверждения прав (не секреты): Яндекс Вебмастер — файл yandex_<код>.html
+YANDEX_CODES = {"0c8acc3e8bcc9a6a"}
+GOOGLE_FILES = set()  # google<код>.html, если подтверждать Search Console файлом
+
+
+def verify_yandex(code):
+    if code not in YANDEX_CODES:
+        abort(404)
+    return ('<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+</head>
+'
+            f'<body>Verification: {code}</body>
+</html>')
+
+
+def verify_google(code):
+    if code not in GOOGLE_FILES:
+        abort(404)
+    return f"google-site-verification: google{code}.html"
+
+
 def register(app, data_dir):
     global VIEWS_FILE
     VIEWS_FILE = os.path.join(data_dir, "site_views.json")
@@ -188,3 +211,5 @@ def register(app, data_dir):
     app.add_url_rule("/sitemap.xml", "site_sitemap", sitemap)
     app.add_url_rule("/robots.txt", "site_robots", robots)
     app.add_url_rule("/card/<key>.jpg", "site_card", card)
+    app.add_url_rule("/yandex_<code>.html", "site_verify_yandex", verify_yandex)
+    app.add_url_rule("/google<code>.html", "site_verify_google", verify_google)
