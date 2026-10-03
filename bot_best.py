@@ -1615,7 +1615,8 @@ def show_examples(message):
 
 def send_free_pdf(chat_id):
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("📖 Дневник Алисы", url=CHANNEL_URL))
+    kb.add(types.InlineKeyboardButton("📖 Подписаться на дневник — фраза каждый вечер", url=CHANNEL_URL))
+    kb.add(types.InlineKeyboardButton("🎀 Письмо с открыткой к поводу", callback_data="occ:catalog"))
     kb.add(types.InlineKeyboardButton("💌 Начало моего письма — бесплатно",
                                       callback_data="free:letter"))
     try:
@@ -1624,7 +1625,8 @@ def send_free_pdf(chat_id):
                 chat_id, f,
                 caption=(
                     "Шпаргалка «50 фраз для трудных разговоров» 🤍\n\n"
-                    "Раз в месяц я её обновляю — свежая версия всегда в дневнике."
+                    "Это начало. В моём дневнике каждый вечер в 20:00 — новая история "
+                    "и одна фраза, которую можно забрать себе 🔖 Подпишись, чтобы не потерять."
                 ),
                 reply_markup=kb,
             )
