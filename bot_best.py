@@ -7,11 +7,15 @@
 import os
 import json
 import logging
+import re
 import secrets
+import threading
+import time
 import urllib.parse
 from datetime import datetime, timedelta
 
 import pytz
+import requests
 from dotenv import load_dotenv
 from flask import Flask, request
 from telebot import TeleBot, types
@@ -40,11 +44,23 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "alisanevskaya_letters_bot")
 PORT = int(os.getenv("PORT", "5000"))
 # Провайдер оплаты ЮKassa, подключённый боту через @BotFather -> Payments.
 YOOKASSA_PROVIDER_TOKEN = os.getenv("YOOKASSA_PROVIDER_TOKEN", "")
+# Оплата на странице ЮKassa (все способы магазина: СБП, T-Pay, SberPay, карты, ЮMoney).
+# Если ключи магазина заданы — используется она, иначе встроенная оплата Telegram.
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+YOOKASSA_RECEIPT = os.getenv("YOOKASSA_RECEIPT", "").lower() in ("1", "true", "yes")  # чек 54-ФЗ
+YOOKASSA_VAT_CODE = int(os.getenv("YOOKASSA_VAT_CODE", "1"))  # 1 = без НДС
+YK_API = "https://api.yookassa.ru/v3/payments"
+
+
+def yk_enabled():
+    return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+
 
 if not TG_BOT_TOKEN:
     raise ValueError("TG_BOT_TOKEN не задан в окружении")
-if not YOOKASSA_PROVIDER_TOKEN:
-    log.warning("YOOKASSA_PROVIDER_TOKEN не задан — оплата будет недоступна")
+if not (YOOKASSA_PROVIDER_TOKEN or yk_enabled()):
+    log.warning("ни YOOKASSA_SHOP_ID/SECRET_KEY, ни YOOKASSA_PROVIDER_TOKEN не заданы — оплата будет недоступна")
 
 app = Flask(__name__)
 bot = TeleBot(TG_BOT_TOKEN, threaded=False)
@@ -706,9 +722,20 @@ def order_create(call):
         notify_admin_new_order(order)
 
 
+def order_description(order):
+    order_id = order["order_id"]
+    if order.get("product") == OCC.PACK["key"]:
+        return f"3 письма с открыткой, без срока. Заказ {order_id}."
+    if order.get("product"):
+        return f"Письмо и открытка — сразу после оплаты. Заказ {order_id}."
+    return f"Целиком, сразу после оплаты. Заказ {order_id}."
+
+
 def send_order_invoice(chat_id, order):
     """Отправляет окно оплаты для заказа. Возвращает True при успехе."""
     order_id = order["order_id"]
+    if yk_enabled():
+        return send_yk_payment(chat_id, order)
     if not YOOKASSA_PROVIDER_TOKEN:
         bot.send_message(
             chat_id,
@@ -720,13 +747,7 @@ def send_order_invoice(chat_id, order):
         bot.send_invoice(
             chat_id=chat_id,
             title=f"Письмо от Алисы · {pain_meta(order)['title']}"[:32],
-            description=(
-                f"3 письма с открыткой, без срока. Заказ {order_id}."
-                if order.get("product") == OCC.PACK["key"] else
-                f"Письмо и открытка — сразу после оплаты. Заказ {order_id}."
-                if order.get("product") else
-                f"Целиком, сразу после оплаты. Заказ {order_id}."
-            ),
+            description=order_description(order),
             invoice_payload=order_id,
             provider_token=YOOKASSA_PROVIDER_TOKEN,
             currency="RUB",
@@ -745,6 +766,173 @@ def send_order_invoice(chat_id, order):
             parse_mode="HTML",
         )
         return False
+
+
+# ── Оплата на странице ЮKassa ────────────────────────────────
+YK_LOCK = threading.Lock()
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def yk_request(method, url, payload=None, idem=None):
+    headers = {"Content-Type": "application/json"}
+    if idem:
+        headers["Idempotence-Key"] = idem
+    r = requests.request(method, url, json=payload, headers=headers,
+                         auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY), timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def yk_got_email(message, order_id):
+    chat_id = message.chat.id
+    email = (message.text or "").strip()
+    order = get_order(order_id)
+    if not order or order.get("status") != "pending":
+        return
+    if not EMAIL_RE.match(email):
+        msg = bot.send_message(chat_id, "Не похоже на почту 🙈 Напиши, пожалуйста, в виде name@mail.ru")
+        bot.register_next_step_handler(msg, yk_got_email, order_id)
+        return
+    profile = get_client(chat_id)
+    if profile is not None:
+        profile["email"] = email
+        write_json(client_path(chat_id), profile)
+    send_yk_payment(chat_id, order, email=email)
+
+
+def send_yk_payment(chat_id, order, email=None):
+    """Создаёт платёж ЮKassa и присылает кнопку на страницу оплаты."""
+    order_id = order["order_id"]
+    if YOOKASSA_RECEIPT and not email:
+        email = order.get("email") or (get_client(chat_id) or {}).get("email")
+        if not email:
+            msg = bot.send_message(chat_id, "📧 Куда прислать чек? Напиши почту одним сообщением.")
+            bot.register_next_step_handler(msg, yk_got_email, order_id)
+            return True
+    price = f"{order['price_rub']}.00"
+    payload = {
+        "amount": {"value": price, "currency": "RUB"},
+        "capture": True,
+        "confirmation": {"type": "redirect", "return_url": f"https://t.me/{BOT_USERNAME}"},
+        "description": order_description(order)[:128],
+        "metadata": {"order_id": order_id, "chat_id": str(chat_id)},
+    }
+    if YOOKASSA_RECEIPT:
+        payload["receipt"] = {
+            "customer": {"email": email},
+            "items": [{
+                "description": f"Письмо от Алисы · {pain_meta(order)['title']}"[:128],
+                "quantity": "1.00",
+                "amount": {"value": price, "currency": "RUB"},
+                "vat_code": YOOKASSA_VAT_CODE,
+                "payment_mode": "full_payment",
+                "payment_subject": "service",
+            }],
+        }
+    try:
+        payment = yk_request("POST", YK_API, payload, idem=f"{order_id}-{secrets.token_hex(6)}")
+        url = payment["confirmation"]["confirmation_url"]
+    except Exception as exc:
+        log.error("yookassa create error %s: %s", order_id, exc)
+        bot.send_message(
+            chat_id,
+            "⚠️ Не смог открыть страницу оплаты.\n"
+            f"Номер заказа: <code>{order_id}</code>\n"
+            "Попробуй ещё раз через минуту или напиши в «❓ Помощь».",
+            parse_mode="HTML",
+        )
+        return False
+
+    order["yk_payment_id"] = payment["id"]
+    order["yk_created_at"] = now_msk().isoformat()
+    if email:
+        order["email"] = email
+    save_order(order)
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"💳 Оплатить {order['price_rub']}₽", url=url))
+    kb.add(types.InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"yk:check:{order_id}"))
+    bot.send_message(
+        chat_id,
+        f"Заказ <code>{order_id}</code> · {order['price_rub']}₽\n\n"
+        "Оплата — на защищённой странице ЮKassa: СБП, T-Pay, SberPay, карта или ЮMoney.\n"
+        "После оплаты вернись сюда — письмо придёт само в течение минуты 🤍",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    return True
+
+
+def yk_check_order(order_id):
+    """Сверяет платёж с ЮKassa; при успехе выдаёт заказ. Возвращает статус платежа."""
+    with YK_LOCK:
+        order = get_order(order_id)
+        if not order or not order.get("yk_payment_id"):
+            return None
+        if order.get("status") != "pending":
+            return "succeeded"
+        payment = yk_request("GET", f"{YK_API}/{order['yk_payment_id']}")
+        status = payment.get("status")
+        paid_ok = (
+            status == "succeeded" and payment.get("paid")
+            and payment.get("amount", {}).get("value") == f"{order['price_rub']}.00"
+        )
+        if paid_ok:
+            fulfill_order(order["chat_id"], order_id, payment["id"], order.get("email"))
+        elif status == "canceled":
+            order.pop("yk_payment_id", None)
+            save_order(order)
+        return status
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("yk:check:"))
+def yk_check_button(call):
+    order_id = call.data.split(":", 2)[2]
+    order = get_order(order_id)
+    if not order or order.get("chat_id") != call.message.chat.id:
+        bot.answer_callback_query(call.id, "Заказ не найден")
+        return
+    try:
+        status = yk_check_order(order_id)
+    except Exception as exc:
+        log.error("yookassa check error %s: %s", order_id, exc)
+        status = None
+    if status == "succeeded":
+        bot.answer_callback_query(call.id, "Оплата получена ✅")
+    elif status == "canceled":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "Платёж не прошёл. Можно попробовать ещё раз:",
+                         reply_markup=pending_markup(order_id))
+    else:
+        bot.answer_callback_query(call.id, "Оплата пока не поступила. Если уже оплатил(а) — подожди минуту.",
+                                  show_alert=True)
+
+
+def yk_poll_loop():
+    """Каждые 15 с проверяет неоплаченные заказы с платежом ЮKassa (до 24 ч)."""
+    while True:
+        try:
+            for o in all_orders():
+                if o.get("status") != "pending" or not o.get("yk_payment_id"):
+                    continue
+                created = datetime.fromisoformat(o.get("yk_created_at") or now_msk().isoformat())
+                if now_msk() - created > timedelta(hours=24):
+                    o.pop("yk_payment_id", None)
+                    save_order(o)
+                    continue
+                try:
+                    yk_check_order(o["order_id"])
+                except Exception as exc:
+                    log.error("yookassa poll %s: %s", o["order_id"], exc)
+        except Exception as exc:
+            log.error("yookassa poll loop error: %s", exc)
+        time.sleep(15)
+
+
+def start_yk_poller():
+    if yk_enabled():
+        threading.Thread(target=yk_poll_loop, name="yk_poll", daemon=True).start()
+        log.info("оплата: страница ЮKassa")
 
 
 def pending_orders(chat_id):
@@ -805,9 +993,17 @@ def pre_checkout(query):
 
 @bot.message_handler(content_types=["successful_payment"])
 def on_paid(message):
-    chat_id = message.chat.id
     payment = message.successful_payment
-    order_id = payment.invoice_payload
+    fulfill_order(
+        message.chat.id,
+        payment.invoice_payload,
+        payment.telegram_payment_charge_id,
+        payment.order_info.email if payment.order_info else None,
+    )
+
+
+def fulfill_order(chat_id, order_id, charge_id, email):
+    """Отмечает заказ оплаченным и выдаёт результат (общий путь для Telegram и ЮKassa)."""
     order = get_order(order_id)
 
     if not order:
@@ -822,8 +1018,8 @@ def on_paid(message):
     order["status"] = "done"
     order["paid_at"] = now_msk().isoformat()
     order["delivered_at"] = now_msk().isoformat()
-    order["charge_id"] = payment.telegram_payment_charge_id
-    order["email"] = payment.order_info.email if payment.order_info else None
+    order["charge_id"] = charge_id
+    order["email"] = email or order.get("email")
     save_order(order)
     STATES.pop(chat_id, None)
 
@@ -2805,6 +3001,7 @@ if __name__ == "__main__":
     else:
         log.error("STORAGE NOT WRITABLE: %s", _where)
     start_autobackup()
+    start_yk_poller()
 
     if WEBHOOK_URL:
         bot.remove_webhook()
