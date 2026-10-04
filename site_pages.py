@@ -201,7 +201,7 @@ def sitemap():
 
 
 def robots():
-    return Response(f"User-agent: *\nDisallow: /stats/\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n", mimetype="text/plain")
+    return Response(f"User-agent: *\nDisallow: /stats/\nDisallow: /e/\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n", mimetype="text/plain")
 
 
 def card(key):

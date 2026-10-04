@@ -828,29 +828,8 @@ def send_yk_payment(chat_id, order, email=None):
             msg = bot.send_message(chat_id, "📧 Куда прислать чек? Напиши почту одним сообщением.")
             bot.register_next_step_handler(msg, yk_got_email, order_id)
             return True
-    price = f"{order['price_rub']}.00"
-    payload = {
-        "amount": {"value": price, "currency": "RUB"},
-        "capture": True,
-        "confirmation": {"type": "redirect", "return_url": f"https://t.me/{BOT_USERNAME}"},
-        "description": order_description(order)[:128],
-        "metadata": {"order_id": order_id, "chat_id": str(chat_id)},
-    }
-    if YOOKASSA_RECEIPT:
-        payload["receipt"] = {
-            "customer": {"email": email},
-            "items": [{
-                "description": f"Письмо от Алисы · {pain_meta(order)['title']}"[:128],
-                "quantity": "1.00",
-                "amount": {"value": price, "currency": "RUB"},
-                "vat_code": YOOKASSA_VAT_CODE,
-                "payment_mode": "full_payment",
-                "payment_subject": "service",
-            }],
-        }
     try:
-        payment = yk_request("POST", YK_API, payload, idem=f"{order_id}-{secrets.token_hex(6)}")
-        url = payment["confirmation"]["confirmation_url"]
+        url = yk_create(order, email, f"https://t.me/{BOT_USERNAME}")
     except Exception as exc:
         log.error("yookassa create error %s: %s", order_id, exc)
         bot.send_message(
@@ -861,12 +840,6 @@ def send_yk_payment(chat_id, order, email=None):
             parse_mode="HTML",
         )
         return False
-
-    order["yk_payment_id"] = payment["id"]
-    order["yk_created_at"] = now_msk().isoformat()
-    if email:
-        order["email"] = email
-    save_order(order)
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(f"💳 Оплатить {order['price_rub']}₽", url=url))
@@ -880,6 +853,38 @@ def send_yk_payment(chat_id, order, email=None):
         reply_markup=kb,
     )
     return True
+
+
+def yk_create(order, email, return_url):
+    """Создаёт платёж ЮKassa для заказа (Telegram или VK) и возвращает ссылку на оплату."""
+    order_id = order["order_id"]
+    price = f"{order['price_rub']}.00"
+    payload = {
+        "amount": {"value": price, "currency": "RUB"},
+        "capture": True,
+        "confirmation": {"type": "redirect", "return_url": return_url},
+        "description": order_description(order)[:128],
+        "metadata": {"order_id": order_id, "chat_id": str(order["chat_id"])},
+    }
+    if YOOKASSA_RECEIPT:
+        payload["receipt"] = {
+            "customer": {"email": email},
+            "items": [{
+                "description": f"Письмо от Алисы · {pain_meta(order)['title']}"[:128],
+                "quantity": "1.00",
+                "amount": {"value": price, "currency": "RUB"},
+                "vat_code": YOOKASSA_VAT_CODE,
+                "payment_mode": "full_payment",
+                "payment_subject": "service",
+            }],
+        }
+    payment = yk_request("POST", YK_API, payload, idem=f"{order_id}-{secrets.token_hex(6)}")
+    order["yk_payment_id"] = payment["id"]
+    order["yk_created_at"] = now_msk().isoformat()
+    if email:
+        order["email"] = email
+    save_order(order)
+    return payment["confirmation"]["confirmation_url"]
 
 
 def yk_check_order(order_id):
@@ -1041,6 +1046,15 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     order["email"] = email or order.get("email")
     save_order(order)
     STATES.pop(chat_id, None)
+
+    if order.get("channel") == "vk":
+        import vk_shop
+        try:
+            vk_shop.on_paid(order)
+        except Exception as exc:
+            log.error("vk deliver %s: %s", order_id, exc)
+        notify_admin_paid(order)
+        return
 
     profile = get_client(chat_id)
     if profile:
@@ -1675,14 +1689,24 @@ def occ_pack(call):
     send_order_invoice(chat_id, order)
 
 
-def occ_gift_link(order):
+def occ_gift_code(order):
     code = order.get("gift_code")
     if not code:
         code = secrets.token_urlsafe(6).replace("-", "x").replace("_", "y")
         order["gift_code"] = code
         save_order(order)
         write_json(gift_path(code), {"order_id": order["order_id"]})
-    return f"https://t.me/{BOT_USERNAME}?start=g_{code}"
+    return code
+
+
+def occ_gift_link(order):
+    return f"https://t.me/{BOT_USERNAME}?start=g_{occ_gift_code(order)}"
+
+
+def occ_web_envelope(order):
+    """Конверт в браузере — для получателей без Telegram (заказы из VK)."""
+    import site_pages
+    return f"{site_pages.SITE_URL}/e/{occ_gift_code(order)}"
 
 
 def occ_postcard(order, preview=False):
@@ -2987,6 +3011,83 @@ site_pages.register(app, DATA_DIR)
 
 # Ключ для /stats выводится из токена бота: локальный отчёт считает его так же,
 # отдельный секрет не нужен. Наружу отдаются только агрегаты, без личных данных.
+# ── Конверт в браузере (получатели из VK и без Telegram) ─────
+BOT_UA = ("bot", "vkshare", "telegram", "facebookexternalhit", "preview", "crawler", "spider", "whatsapp")
+ENVELOPE_CSS = ("body{margin:0;background:#f6f0e6;color:#3b2f2a;font:18px/1.6 Georgia,serif}"
+                ".w{max-width:640px;margin:0 auto;padding:32px 16px 48px}img{width:100%;border-radius:10px;"
+                "box-shadow:0 8px 24px rgba(0,0,0,.15)}.b{display:inline-block;margin-top:20px;padding:14px 26px;"
+                "background:#8a4b3c;color:#fff;border-radius:999px;text-decoration:none;font-family:sans-serif}"
+                ".l{white-space:pre-wrap;margin:28px 0}.f{font:14px/1.5 sans-serif;color:#7a6a60;margin-top:36px}")
+
+
+def envelope_order(code):
+    ref = read_json(gift_path(os.path.basename(code)), None)
+    order = get_order(ref["order_id"]) if ref else None
+    return order if order and order.get("status") == "done" else None
+
+
+def envelope_html(title, body):
+    return ('<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" '
+            'content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">'
+            f'<title>{esc(title)}</title><style>{ENVELOPE_CSS}</style></head><body><div class="w">{body}</div></body></html>')
+
+
+@app.route("/e/<code>", methods=["GET"])
+def envelope_closed(code):
+    order = envelope_order(code)
+    if not order:
+        return envelope_html("Конверт не найден", "<h2>Конверт не найден 😔</h2><p>Возможно, ссылка скопирована не полностью.</p>"), 404
+    name, who = order.get("gift_for") or "", order.get("sign") or "близкого человека"
+    return envelope_html("Тебе письмо 💌",
+                         f'<h1>💌 {esc(name) + ", тебе" if name else "Тебе"} письмо</h1>'
+                         f'<p>От <b>{esc(who)}</b>. Внутри — открытка и несколько слов, написанных специально для тебя.</p>'
+                         f'<a class="b" href="/e/{esc(code)}/open">✉️ Вскрыть конверт</a>')
+
+
+@app.route("/e/<code>/open", methods=["GET"])
+def envelope_open(code):
+    order = envelope_order(code)
+    if not order:
+        return envelope_closed(code)
+    ua = (request.headers.get("User-Agent") or "").lower()
+    if not order.get("opened_at") and ua and not any(b in ua for b in BOT_UA):
+        order["opened_at"] = now_msk().isoformat()
+        order["opened_by"] = "web"
+        save_order(order)
+        try:
+            if order.get("channel") == "vk":
+                import vk_shop
+                vk_shop.notify_opened(order)
+            else:
+                bot.send_message(order["chat_id"],
+                                 f"✨ {esc(order.get('gift_for') or 'Получатель')} только что открыл(а) твоё письмо.",
+                                 parse_mode="HTML")
+        except Exception as exc:
+            log.error("envelope notify %s: %s", order["order_id"], exc)
+    return envelope_html("Письмо 💌",
+                         f'<img src="/e/{esc(code)}.jpg" alt="Открытка"><div class="l">{esc(order.get("letter_text", ""))}</div>'
+                         '<div class="f">Это письмо собрала Алиса Невская — цифровая героиня проекта «Когда трудно сказать '
+                         'важное — здесь находятся слова». Захочется ответить так же — '
+                         f'<a href="https://vk.me/alisanevskaya_diary">напиши Алисе во ВКонтакте</a> или '
+                         f'<a href="https://t.me/{BOT_USERNAME}?start=occ">в Telegram</a>.</div>')
+
+
+@app.route("/e/<code>.jpg", methods=["GET"])
+def envelope_card(code):
+    order = envelope_order(code)
+    if not order:
+        return "", 404
+    return occ_postcard(order), 200, {"Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400"}
+
+
+def vk_shop_deps():
+    from types import SimpleNamespace
+    return SimpleNamespace(save_order=save_order, get_order=get_order, new_order_id=new_order_id,
+                           now_msk=now_msk, yk_create=yk_create, yk_check=yk_check_order,
+                           receipt_required=YOOKASSA_RECEIPT, notify_new=notify_admin_new_order,
+                           envelope_url=occ_web_envelope, data_dir=DATA_DIR)
+
+
 STATS_KEY = hashlib.sha256(f"{TG_BOT_TOKEN}:stats".encode()).hexdigest()[:24]
 
 
@@ -3009,6 +3110,14 @@ def bot_stats(days=62):
             day(d)["new_clients"] += 1
             src = c.get("source", "unknown")
             sources[src] = sources.get(src, 0) + 1
+    vk_dir = os.path.join(DATA_DIR, "vk_clients")
+    for fname in (os.listdir(vk_dir) if os.path.isdir(vk_dir) else []):
+        c = read_json(os.path.join(vk_dir, fname), None) or {}
+        clients_total += 1
+        d = (c.get("created_at") or "")[:10]
+        if d >= since:
+            day(d)["new_clients"] += 1
+            sources["vk_dm"] = sources.get("vk_dm", 0) + 1
     revenue_total, paid_total, gifts_sent, gifts_opened = 0, 0, 0, 0
     for o in all_orders():
         d = (o.get("created_at") or "")[:10]
@@ -3162,6 +3271,8 @@ if __name__ == "__main__":
     start_yk_poller()
     try:
         import vk_bridge
+        import vk_shop
+        vk_shop.init(vk_shop_deps())
         vk_bridge.start()
     except Exception as exc:
         log.error("vk bridge: %s", exc)

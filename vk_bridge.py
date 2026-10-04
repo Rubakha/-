@@ -21,6 +21,7 @@ TOKEN = os.getenv("VK_GROUP_TOKEN", "")
 GROUP_ID = int(os.getenv("VK_GROUP_ID", "241052759"))
 API_V = "5.199"
 BOT_LINK = "t.me/alisanevskaya_letters_bot"
+SHOP = None  # vk_shop подключается из bot_best: заказ и оплата прямо в сообщениях
 
 SYSTEM_COMMENT = (
     "Ты — Алиса Невская, цифровая девушка из Петербурга, героиня дневника «Когда трудно сказать "
@@ -37,8 +38,8 @@ SYSTEM_COMMENT = (
 SYSTEM_DM = (
     "Ты — Алиса Невская, цифровая девушка из Петербурга. Тебе написали в личные сообщения сообщества VK. "
     "Отвечай тепло и по делу, 2–4 предложения, на «ты». Если человеку нужно письмо, которое трудно написать "
-    f"самому, — предложи собрать его вместе в боте: {BOT_LINK}. Если нужна открытка к поводу — "
-    f"{BOT_LINK}?start=occ (от 199 ₽). Если просто нужны слова для трудного разговора — бесплатная шпаргалка "
+    f"самому, или открытка к поводу — предложи собрать их прямо здесь, в сообщениях: пусть напишет "
+    "«каталог» (от 199 ₽, превью до оплаты, письмо придёт сюда же). Если просто нужны слова для трудного разговора — бесплатная шпаргалка "
     f"«50 фраз»: {BOT_LINK}?start=pdf. Давай одну ссылку, а не все сразу, и только если она к месту. "
     "Если человеку плохо — сначала поддержи, без советов; при мыслях о самоповреждении мягко посоветуй "
     "обратиться на телефон доверия 8-800-2000-122 (бесплатно). Если спрашивают, человек ли ты, — честно: "
@@ -94,6 +95,8 @@ def handle(update):
         service = attached_service(msg)
         if msg.get("from_id", 0) <= 0 or not (msg.get("text") or service):
             return
+        if SHOP and SHOP.handle_message(msg, service[1] if service else None):
+            return
         prompt = msg.get("text") or "(без текста)"
         if service:
             title, key = service
@@ -105,6 +108,13 @@ def handle(update):
             time.sleep(random.randint(5, 20))
             api("messages.send", peer_id=msg["peer_id"], message=answer,
                 random_id=random.randint(1, 2 ** 31 - 1))
+
+
+def safe_handle(upd):
+    try:
+        handle(upd)
+    except Exception as exc:
+        log.error("vk handle error: %s", exc)
 
 
 def loop():
@@ -122,10 +132,8 @@ def loop():
                     break  # ключ устарел — взять новый сервер
                 ts = resp["ts"]
                 for upd in resp.get("updates", []):
-                    try:
-                        handle(upd)
-                    except Exception as exc:
-                        log.error("vk handle error: %s", exc)
+                    # в потоке: генерация письма идёт минуту и не должна задерживать других
+                    threading.Thread(target=safe_handle, args=(upd,), daemon=True).start()
         except Exception as exc:
             log.error("vk longpoll error: %s", exc)
             time.sleep(30)
