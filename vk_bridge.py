@@ -61,6 +61,24 @@ def reply_text(system, text):
     return out.strip().strip('"«»')
 
 
+# карточки «Услуги» сообщества → продукт бота (ключ occasions.PRODUCTS)
+SERVICE_KEYS = [("деда мороза", "santa"), ("любов", "love"), ("тост", "toast"), ("речь", "toast"),
+                ("папе", "family"), ("маме", "family")]
+
+
+def attached_service(msg):
+    """Если сообщение пришло с кнопки «Написать» карточки услуги/товара — (название, ключ продукта)."""
+    for a in msg.get("attachments") or []:
+        item = a.get(a.get("type"), {}) if a.get("type") in ("market", "service", "link") else {}
+        title = (item.get("title") or "").strip()
+        if title:
+            low = title.lower()
+            key = next((k for word, k in SERVICE_KEYS if word in low), None)
+            if key:
+                return title, key
+    return None
+
+
 def handle(update):
     kind, obj = update.get("type"), update.get("object", {})
     if kind == "wall_reply_new":
@@ -73,9 +91,16 @@ def handle(update):
                 reply_to_comment=obj["id"], message=answer, from_group=GROUP_ID)
     elif kind == "message_new":
         msg = obj.get("message", obj)
-        if msg.get("from_id", 0) <= 0 or not msg.get("text"):
+        service = attached_service(msg)
+        if msg.get("from_id", 0) <= 0 or not (msg.get("text") or service):
             return
-        answer = reply_text(SYSTEM_DM, msg["text"])
+        prompt = msg.get("text") or "(без текста)"
+        if service:
+            title, key = service
+            prompt = (f"Человек нажал «Написать» на услуге сообщества «{title}». Его сообщение: {prompt}\n"
+                      f"Объясни в 2–3 предложениях, как заказать, и дай ссылку, по которой сразу начать: "
+                      f"{BOT_LINK}?start=v_{key}")
+        answer = reply_text(SYSTEM_DM, prompt)
         if answer:
             time.sleep(random.randint(5, 20))
             api("messages.send", peer_id=msg["peer_id"], message=answer,

@@ -426,7 +426,7 @@ def cmd_start(message):
         # первая точка входа для аналитики: pdf / occ / g_<код> / ref_<id> / direct
         src = parts[1] if len(parts) == 2 else "direct"
         profile["source"] = ("gift" if src.startswith("g_") else "ref" if src.startswith("ref_")
-                             else "web" if src.startswith("w_") else src[:32])
+                             else "web" if src.startswith("w_") else "vk" if src.startswith("v_") else src[:32])
         write_json(client_path(chat_id), profile)
 
     if chat_id == ADMIN_ID:
@@ -466,7 +466,7 @@ def cmd_start(message):
         occ_open_catalog(chat_id)
     elif len(parts) == 2 and parts[1].startswith("occ_"):
         occ_open_product(chat_id, parts[1][4:])
-    elif len(parts) == 2 and parts[1].startswith("w_"):  # переход с сайта
+    elif len(parts) == 2 and parts[1].startswith(("w_", "v_")):  # переход с сайта / из услуг VK
         key = parts[1][2:]
         if key in OCC.PRODUCTS:
             occ_open_product(chat_id, key)

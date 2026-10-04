@@ -17,4 +17,10 @@ V.handle({"type": "wall_reply_new", "object": {"from_id": 9, "post_id": 46, "id"
 assert len(CALLS) == n, "ответили себе или на спам"
 V.handle({"type": "message_new", "object": {"message": {"from_id": 5, "peer_id": 5, "text": "Хочу письмо маме"}}})
 assert CALLS[-1][0] == "messages.send" and CALLS[-1][1]["peer_id"] == 5
+SEEN = []
+V.AI._call = lambda system, text, max_tokens=0: SEEN.append(text) or "ок"
+V.handle({"type": "message_new", "object": {"message": {"from_id": 6, "peer_id": 6, "text": "",
+          "attachments": [{"type": "market", "market": {"title": "Именное письмо от Деда Мороза ребёнку"}}]}}})
+assert CALLS[-1][1]["peer_id"] == 6 and "start=v_santa" in SEEN[-1], SEEN
+assert V.attached_service({"attachments": [{"type": "photo", "photo": {}}]}) is None
 print("OK: vk bridge")
