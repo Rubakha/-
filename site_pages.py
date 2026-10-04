@@ -11,6 +11,7 @@ from flask import Response, abort, request, send_file
 
 import occasions as OCC
 from site_content import FATHER_DAY, PAGES
+from site_special import SPECIAL
 
 BOT = os.getenv("BOT_USERNAME", "alisanevskaya_letters_bot")
 SITE_URL = os.getenv("SITE_URL", "https://alisabot-w-sergeyrubakha1s.mia0.amvera.tech").rstrip("/")
@@ -114,13 +115,27 @@ HOW = ('<h2>Как это работает</h2><ol class="steps"><li>Выбир�
        '<li>Отправляете близкому ссылку-конверт и получаете уведомление, когда он его откроет.</li></ol>')
 
 
+def season_cta():
+    md = datetime.now().strftime("%m-%d")
+    if md <= "10-18":
+        return '<div class="cta"><b>18 октября — День отца.</b><br><a href="/den-otca">Что написать папе →</a></div>'
+    if md <= "11-29":
+        return '<div class="cta"><b>29 ноября — День матери.</b><br><a href="/den-materi">Что написать маме →</a></div>'
+    return '<div class="cta"><b>Скоро Новый год.</b><br><a href="/pozdravlenie-kollegam-s-novym-godom">Поздравление коллегам →</a></div>'
+
+
+def special_links(skip=None):
+    items = [("/den-otca", "Что написать папе на День отца")] + [(f"/{k}", v["h1"].split(":")[0]) for k, v in SPECIAL.items()]
+    return " · ".join(f'<a href="{u}">{html.escape(t)}</a>' for u, t in items if u != skip)
+
+
 def home():
     body = (f'<h1>Письмо и открытка к любому поводу — за 3 минуты</h1>'
             f'<p class="lead">Когда трудно сказать важное — Алиса помогает найти слова: маме и папе, любимым, другу, «прости» и «спасибо». От {OCC.price_from()} ₽.</p>'
             f'<a class="btn" href="https://t.me/{BOT}?start=w_home">Собрать письмо в Telegram</a>'
             f'<a class="btn ghost" href="https://t.me/{BOT}?start=pdf">50 фраз для трудных разговоров — бесплатно</a>'
             f'{HOW}<h2>Поводы</h2>{tiles()}'
-            f'<div class="cta"><b>18 октября — День отца.</b><br><a href="/den-otca">Что написать папе →</a></div>')
+            f'{season_cta()}<h2>Что написать, когда трудно</h2><p>{special_links()}</p>')
     return page("Письмо с открыткой к любому поводу за 3 минуты — Письма Алисы",
                 "Личное письмо и открытка маме, папе, любимым, другу: ответьте на 3 вопроса — Алиса соберёт слова. От 199 ₽, превью до оплаты.",
                 body, "/")
@@ -142,7 +157,7 @@ def occasion(slug):
             f'<h2>Как написать</h2><ul>{tips}</ul><h2>Примеры фраз</h2>{ex}{HOW}'
             f'<div class="cta"><b>Не хочется подбирать слова самому?</b><p>Ответьте на 3 вопроса — Алиса соберёт письмо вашими деталями и открытку. Превью до оплаты.</p>'
             f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a></div>'
-            f'<h2>Вопросы</h2>{faq}<h2>Другие поводы</h2><p>{others}</p>')
+            f'<h2>Вопросы</h2>{faq}<h2>Другие поводы</h2><p>{others}</p><h2>Что написать, когда трудно</h2><p>{special_links()}</p>')
     return page(m["title"], m["desc"], body, f"/pismo/{slug}", m["faq"])
 
 
@@ -156,12 +171,29 @@ def father_day():
             f'<h2>10 фраз для папы</h2>{ex}<h2>Как начать, если давно не общались</h2><ul>'
             + "".join(f"<li>{html.escape(t)}</li>" for t in fam["tips"]) +
             f'</ul>{HOW}<div class="cta"><b>Успейте к 18 октября</b><p>Письмо готово за 3 минуты, ссылку-конверт можно отправить в любой мессенджер.</p>'
-            f'<a class="btn" href="{bot_link("family")}">Собрать письмо папе</a></div>')
+            f'<a class="btn" href="{bot_link("family")}">Собрать письмо папе</a></div><h2>Ещё по теме</h2><p>{special_links(skip="/den-otca")}</p>')
     return page(FATHER_DAY["title"], FATHER_DAY["desc"], body, "/den-otca", fam["faq"])
 
 
+def special(slug):
+    m = SPECIAL[slug]
+    key, p = m["key"], OCC.PRODUCTS[m["key"]]
+    ex = "".join(f'<div class="hand">{html.escape(e)}</div>' for e in m["examples"])
+    tips = "".join(f"<li>{html.escape(t)}</li>" for t in m["tips"])
+    faq = "".join(f"<details><summary>{html.escape(q)}</summary><p>{html.escape(a)}</p></details>" for q, a in m["faq"])
+    rush = f'Успейте к {m["deadline"]}' if m["deadline"] else "Не хочется подбирать слова самому?"
+    body = (f'<img class="hero-card" src="/card/{key}.jpg" alt="Открытка: {html.escape(p["title"])}">'
+            f'<h1>{html.escape(m["h1"])}</h1><p class="lead">{html.escape(m["lead"])}</p>'
+            f'<a class="btn" href="{bot_link(key)}">Собрать письмо с открыткой — {p["price"]} ₽</a>'
+            f'<h2>Примеры фраз</h2>{ex}<h2>Как написать</h2><ul>{tips}</ul>{HOW}'
+            f'<div class="cta"><b>{rush}</b><p>Ответьте на 3 вопроса — Алиса соберёт письмо вашими деталями и открытку. Превью до оплаты, ссылку-конверт можно отправить в любой мессенджер.</p>'
+            f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a></div>'
+            f'<h2>Вопросы</h2>{faq}<h2>Ещё по теме</h2><p>{special_links(skip="/" + slug)}</p>')
+    return page(m["title"], m["desc"], body, f"/{slug}", m["faq"])
+
+
 def sitemap():
-    urls = ["/", "/den-otca"] + [f"/pismo/{v['slug']}" for v in PAGES.values()]
+    urls = ["/", "/den-otca"] + [f"/{k}" for k in SPECIAL] + [f"/pismo/{v['slug']}" for v in PAGES.values()]
     day = datetime.now().strftime("%Y-%m-%d")
     xml = ('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
            + "".join(f"<url><loc>{SITE_URL}{u}</loc><lastmod>{day}</lastmod></url>" for u in urls) + "</urlset>")
@@ -203,6 +235,8 @@ def register(app, data_dir):
     app.add_url_rule("/", "site_home", home)
     app.add_url_rule("/pismo/<slug>", "site_occasion", occasion)
     app.add_url_rule("/den-otca", "site_father", father_day)
+    for slug in SPECIAL:
+        app.add_url_rule(f"/{slug}", f"site_special_{slug}", lambda slug=slug: special(slug))
     app.add_url_rule("/sitemap.xml", "site_sitemap", sitemap)
     app.add_url_rule("/robots.txt", "site_robots", robots)
     app.add_url_rule("/card/<key>.jpg", "site_card", card)
