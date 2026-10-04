@@ -138,4 +138,9 @@ assert last_text() == "Привет! Как ты?"
 
 stats = B.bot_stats()
 assert stats["sources"].get("vk_dm") == 1 and stats["paid_total"] == 1, stats
+# без прав на фото открытка уходит ссылкой на картинку
+VB.api = lambda method, **p: (_ for _ in ()).throw(RuntimeError("no photos")) if method.startswith("photos.") else fake_vk(method, **p)
+att, link = S.card_attachment(PEER, b"\xff\xd8jpg")
+assert att is None and "/pv/" in link
+assert c.get(link.strip().split(".tech", 1)[1]).data == b"\xff\xd8jpg"
 print("OK: vk shop")

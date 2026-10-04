@@ -27,6 +27,7 @@ STATES = {}              # peer_id → состояние анкеты
 LOCKS = {}
 LOCKS_GUARD = threading.Lock()
 RETURN_URL = "https://vk.me/alisanevskaya_diary"
+PREVIEWS = {}            # запасной путь, если ключу VK не дали права на фото: открытка по ссылке
 START_WORDS = ("начать", "каталог", "меню", "письмо", "письма", "открытк", "заказ", "купить", "start")
 
 
@@ -96,6 +97,20 @@ def upload_photo(peer, jpg):
     except Exception as exc:
         log.error("vk photo upload: %s", exc)
         return None
+
+
+def card_attachment(peer, jpg):
+    """(attachment, текст-ссылка): фото в сообщении, а без прав на фото — ссылка на картинку."""
+    photo = upload_photo(peer, jpg)
+    if photo:
+        return photo, ""
+    import secrets
+    import site_pages
+    if len(PREVIEWS) > 300:
+        PREVIEWS.pop(next(iter(PREVIEWS)))
+    token = secrets.token_urlsafe(9)
+    PREVIEWS[token] = jpg
+    return None, f"\n{site_pages.SITE_URL}/pv/{token}.jpg"
 
 
 def short(url):
@@ -176,9 +191,8 @@ def finish(peer):
                     [[btn("Попробовать снова", {"c": "go", "k": key}, "primary")]])
     st.update(step="pay", letter=res["letter"], card_title=res["card_title"],
               card_line=res["card_line"], sign=sign, name=name)
-    photo = upload_photo(peer, postcards.render(key, res["card_title"], res["card_line"], sign, preview=True))
-    if photo:
-        send(peer, "Твоя открытка (превью) 🖼", attachment=photo)
+    photo, link = card_attachment(peer, postcards.render(key, res["card_title"], res["card_line"], sign, preview=True))
+    send(peer, "Твоя открытка (превью) 🖼" + link, attachment=photo)
     letter = res["letter"]
     cut = max(220, int(len(letter) * 0.4))
     send(peer, letter[:cut].rsplit(" ", 1)[0] + "…\n\n🔒 Дальше — письмо целиком, чистая открытка "
@@ -268,10 +282,9 @@ def on_paid(order):
     STATES.pop(peer, None)
     send(peer, f"✅ Оплата прошла · заказ {order['order_id']}"
                + (f"\nЧек придёт на {order['email']}" if order.get("email") else ""))
-    photo = upload_photo(peer, postcards.render(order["product"], order.get("card_title", ""),
-                                                order.get("card_line", ""), order.get("sign", "")))
-    if photo:
-        send(peer, "🖼 Твоя открытка", attachment=photo)
+    photo, link = card_attachment(peer, postcards.render(order["product"], order.get("card_title", ""),
+                                                         order.get("card_line", ""), order.get("sign", "")))
+    send(peer, "🖼 Твоя открытка" + link, attachment=photo)
     send_long(peer, order["letter_text"])
     link = short(D.envelope_url(order))
     send(peer, "✉️ Как подарить\n\n"

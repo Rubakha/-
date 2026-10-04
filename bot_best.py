@@ -3080,6 +3080,16 @@ def envelope_card(code):
     return occ_postcard(order), 200, {"Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400"}
 
 
+@app.route("/pv/<token>.jpg", methods=["GET"])
+def vk_card_preview(token):
+    """Открытка для покупателя из VK, если ключу сообщества не дали права на фото."""
+    import vk_shop
+    jpg = vk_shop.PREVIEWS.get(token)
+    if not jpg:
+        return "", 404
+    return jpg, 200, {"Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400"}
+
+
 def vk_shop_deps():
     from types import SimpleNamespace
     return SimpleNamespace(save_order=save_order, get_order=get_order, new_order_id=new_order_id,
