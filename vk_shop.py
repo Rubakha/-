@@ -210,13 +210,13 @@ def user_name(peer):
         return ""
 
 
-def remember_client(peer):
+def remember_client(peer, source="vk_dm"):
     path = os.path.join(D.data_dir, "vk_clients", f"{peer}.json")
     if os.path.exists(path):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"vk_id": peer, "created_at": D.now_msk().isoformat(), "source": "vk"}, f)
+        json.dump({"vk_id": peer, "created_at": D.now_msk().isoformat(), "source": source}, f)
 
 
 def buy(peer):
@@ -323,8 +323,16 @@ def _route(peer, msg, service_key):
         payload = {"c": "cat"}
     cmd = payload.get("c")
     st = STATES.get(peer) or {}
+    ref = msg.get("ref") or ""
+    site_key = ref[5:] if ref.startswith("site_") else ""
+    remember_client(peer, "vk_site" if site_key else "vk_service" if service_key else "vk_dm")
 
-    if service_key:
+    if site_key and not st and cmd in (None, "cat"):
+        if site_key in OCC.PRODUCTS:
+            show_product(peer, site_key)
+        else:
+            show_catalog(peer)
+    elif service_key:
         show_product(peer, service_key)
     elif cmd == "cat":
         STATES.pop(peer, None)

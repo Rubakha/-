@@ -136,8 +136,15 @@ S.AI._call = lambda system, text, max_tokens=0: "Привет! Как ты?"
 say("привет, как дела")
 assert last_text() == "Привет! Как ты?"
 
+# переход с сайта: ref открывает нужный повод, источник «vk_site»
+VB.api = fake_vk
+SITE_PEER = 888
+VB.handle({"type": "message_new", "object": {"message": {"from_id": SITE_PEER, "peer_id": SITE_PEER, "text": "Начать",
+           "payload": json.dumps({"command": "start"}), "ref": "site_love"}}})
+assert "Любовное письмо" in last_text(), last_text()
+
 stats = B.bot_stats()
-assert stats["sources"].get("vk_dm") == 1 and stats["paid_total"] == 1, stats
+assert stats["sources"].get("vk_dm") == 1 and stats["sources"].get("vk_site") == 1 and stats["paid_total"] == 1, stats
 # без прав на фото открытка уходит ссылкой на картинку
 VB.api = lambda method, **p: (_ for _ in ()).throw(RuntimeError("no photos")) if method.startswith("photos.") else fake_vk(method, **p)
 att, link = S.card_attachment(PEER, b"\xff\xd8jpg")

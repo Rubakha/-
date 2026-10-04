@@ -46,6 +46,11 @@ footer{border-top:1px solid var(--line);margin-top:50px;padding:26px 0;color:var
 """
 
 
+def vk_link(key):
+    """Чат сообщества VK: заказ там же, ref открывает нужный повод и считается источником «сайт»."""
+    return f"https://vk.me/alisanevskaya_diary?ref=site_{key}"
+
+
 def bot_link(key):
     return f"https://t.me/{BOT}?start=w_{key}"
 
@@ -133,6 +138,7 @@ def home():
     body = (f'<h1>Письмо и открытка к любому поводу — за 3 минуты</h1>'
             f'<p class="lead">Когда трудно сказать важное — Алиса помогает найти слова: маме и папе, любимым, другу, «прости» и «спасибо». От {OCC.price_from()} ₽.</p>'
             f'<a class="btn" href="https://t.me/{BOT}?start=w_home">Собрать письмо в Telegram</a>'
+            f'<a class="btn ghost" href="{vk_link("home")}">Или во ВКонтакте</a>'
             f'<a class="btn ghost" href="https://t.me/{BOT}?start=pdf">50 фраз для трудных разговоров — бесплатно</a>'
             f'{HOW}<h2>Поводы</h2>{tiles()}'
             f'{season_cta()}<h2>Что написать, когда трудно</h2><p>{special_links()}</p>')
@@ -154,9 +160,10 @@ def occasion(slug):
     body = (f'<img class="hero-card" src="/card/{key}.jpg" alt="Открытка «{html.escape(p["title"])}»">'
             f'<h1>{html.escape(m["h1"])}</h1><p class="lead">{html.escape(m["intro"])}</p>'
             f'<a class="btn" href="{bot_link(key)}">Собрать письмо с открыткой — {p["price"]} ₽</a>'
+            f'<a class="btn ghost" href="{vk_link(key)}">Или во ВКонтакте</a>'
             f'<h2>Как написать</h2><ul>{tips}</ul><h2>Примеры фраз</h2>{ex}{HOW}'
             f'<div class="cta"><b>Не хочется подбирать слова самому?</b><p>Ответьте на 3 вопроса — Алиса соберёт письмо вашими деталями и открытку. Превью до оплаты.</p>'
-            f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a></div>'
+            f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a><a class="btn ghost" href="{vk_link(key)}">Во ВКонтакте</a></div>'
             f'<h2>Вопросы</h2>{faq}<h2>Другие поводы</h2><p>{others}</p><h2>Что написать, когда трудно</h2><p>{special_links()}</p>')
     return page(m["title"], m["desc"], body, f"/pismo/{slug}", m["faq"])
 
@@ -168,6 +175,7 @@ def father_day():
             f'<h1>{FATHER_DAY["h1"]}</h1><p class="lead">Папы редко говорят, что им важно. Но почти каждый ждёт одного: '
             f'услышать, что его забота не прошла зря. Вот слова, с которых можно начать — даже если вы давно не разговаривали.</p>'
             f'<a class="btn" href="{bot_link("family")}">Письмо папе с открыткой — 199 ₽</a>'
+            f'<a class="btn ghost" href="{vk_link("family")}">Или во ВКонтакте</a>'
             f'<h2>10 фраз для папы</h2>{ex}<h2>Как начать, если давно не общались</h2><ul>'
             + "".join(f"<li>{html.escape(t)}</li>" for t in fam["tips"]) +
             f'</ul>{HOW}<div class="cta"><b>Успейте к 18 октября</b><p>Письмо готово за 3 минуты, ссылку-конверт можно отправить в любой мессенджер.</p>'
@@ -185,9 +193,10 @@ def special(slug):
     body = (f'<img class="hero-card" src="/card/{key}.jpg" alt="Открытка: {html.escape(p["title"])}">'
             f'<h1>{html.escape(m["h1"])}</h1><p class="lead">{html.escape(m["lead"])}</p>'
             f'<a class="btn" href="{bot_link(key)}">Собрать письмо с открыткой — {p["price"]} ₽</a>'
+            f'<a class="btn ghost" href="{vk_link(key)}">Или во ВКонтакте</a>'
             f'<h2>Примеры фраз</h2>{ex}<h2>Как написать</h2><ul>{tips}</ul>{HOW}'
             f'<div class="cta"><b>{rush}</b><p>Ответьте на 3 вопроса — Алиса соберёт письмо вашими деталями и открытку. Превью до оплаты, ссылку-конверт можно отправить в любой мессенджер.</p>'
-            f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a></div>'
+            f'<a class="btn" href="{bot_link(key)}">Начать в Telegram</a><a class="btn ghost" href="{vk_link(key)}">Во ВКонтакте</a></div>'
             f'<h2>Вопросы</h2>{faq}<h2>Ещё по теме</h2><p>{special_links(skip="/" + slug)}</p>')
     return page(m["title"], m["desc"], body, f"/{slug}", m["faq"])
 

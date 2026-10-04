@@ -3127,7 +3127,8 @@ def bot_stats(days=62):
         d = (c.get("created_at") or "")[:10]
         if d >= since:
             day(d)["new_clients"] += 1
-            sources["vk_dm"] = sources.get("vk_dm", 0) + 1
+            src = c.get("source") if str(c.get("source", "")).startswith("vk_") else "vk_dm"
+            sources[src] = sources.get(src, 0) + 1
     revenue_total, paid_total, gifts_sent, gifts_opened = 0, 0, 0, 0
     for o in all_orders():
         d = (o.get("created_at") or "")[:10]
