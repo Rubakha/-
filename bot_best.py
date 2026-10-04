@@ -3160,7 +3160,7 @@ def vk_shop_deps():
     from types import SimpleNamespace
     return SimpleNamespace(save_order=save_order, get_order=get_order, new_order_id=new_order_id,
                            now_msk=now_msk, yk_create=yk_create, yk_check=yk_check_order,
-                           receipt_required=YOOKASSA_RECEIPT, notify_new=notify_admin_new_order,
+                           receipt_required=YOOKASSA_RECEIPT, notify_new=notify_admin_new_order, notify_paid=notify_admin_paid,
                            envelope_url=occ_web_envelope, data_dir=DATA_DIR, reminder_due=reminder_due)
 
 

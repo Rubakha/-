@@ -128,7 +128,8 @@ def show_catalog(peer):
              for k in keys[i:i + 2]] for i in range(0, len(keys), 2)]
     send(peer, "💌 Письмо с открыткой — прямо здесь, в сообщениях.\n\n"
                "Выбери повод → ответь на несколько вопросов → посмотри открытку и начало письма. "
-               f"Платишь, только если нравится: от {OCC.price_from()} ₽. Письмо и открытка придут сюда же.",
+               f"Платишь, только если нравится: от {OCC.price_from()} ₽. Письмо и открытка придут сюда же.\n"
+               f"🎁 Набор: 3 письма — {OCC.PACK['price']} ₽ (предложу на экране превью).",
          rows)
 
 
@@ -196,8 +197,17 @@ def finish(peer):
     letter = res["letter"]
     cut = max(220, int(len(letter) * 0.4))
     send(peer, letter[:cut].rsplit(" ", 1)[0] + "…\n\n🔒 Дальше — письмо целиком, чистая открытка "
-               "без надписи «превью» и ссылка-конверт для получателя.",
-         [[btn(f"🔓 Целиком — {p['price']} ₽", {"c": "buy"}, "positive")], [btn("❌ Отменить", {"c": "cancel"})]])
+               "без надписи «превью» и ссылка-конверт для получателя.", paywall_rows(peer, p))
+
+
+def paywall_rows(peer, p):
+    credits = client_get(peer).get("credits", 0)
+    rows = [[btn(f"🎁 Забрать по набору (осталось {credits})", {"c": "credit"}, "positive")]] if credits else []
+    rows.append([btn(f"🔓 Целиком — {p['price']} ₽", {"c": "buy"}, "positive" if not credits else "secondary")])
+    if not credits:
+        rows.append([btn(f"🎁 3 письма — {OCC.PACK['price']} ₽", {"c": "pack"})])
+    rows.append([btn("❌ Отменить", {"c": "cancel"})])
+    return rows
 
 
 # ── заказ и оплата ───────────────────────────────────────────
@@ -210,6 +220,24 @@ def user_name(peer):
         return ""
 
 
+def client_path(peer):
+    return os.path.join(D.data_dir, "vk_clients", f"{peer}.json")
+
+
+def client_get(peer):
+    try:
+        with open(client_path(peer), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def client_save(peer, data):
+    os.makedirs(os.path.dirname(client_path(peer)), exist_ok=True)
+    with open(client_path(peer), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
 def remember_client(peer, source="vk_dm"):
     path = os.path.join(D.data_dir, "vk_clients", f"{peer}.json")
     if os.path.exists(path):
@@ -219,22 +247,58 @@ def remember_client(peer, source="vk_dm"):
         json.dump({"vk_id": peer, "created_at": D.now_msk().isoformat(), "source": source}, f)
 
 
+def make_order(peer, st, product=None, price=None, status="pending"):
+    """Заказ письма из анкеты st или (product=pack3) набора."""
+    key = product or st["product"]
+    order = {
+        "order_id": D.new_order_id(), "chat_id": f"vk{peer}", "vk_peer": peer, "channel": "vk",
+        "name": f"{user_name(peer)} (VK)", "username": f"vk.com/id{peer}", "pain": key, "product": key,
+        "price_rub": price if price is not None else (OCC.PACK["price"] if product else OCC.PRODUCTS[key]["price"]),
+        "status": status, "created_at": D.now_msk().isoformat(),
+        "paid_at": None, "delivered_at": None, "email": None, "rating": None, "is_gift": not product,
+        "answers": [], "letter_text": "",
+    }
+    if not product:
+        order.update(answers=[a for _, a in st["qa"]], qa=st["qa"], mirror_text=None, letter_text=st["letter"],
+                     card_title=st["card_title"], card_line=st["card_line"], sign=st["sign"],
+                     gift_for=st.get("name"))
+    D.save_order(order)
+    return order
+
+
+def buy_pack(peer):
+    remember_client(peer)
+    order = make_order(peer, STATES.get(peer) or {}, product=OCC.PACK["key"])
+    D.notify_new(order)
+    send(peer, f"{OCC.PACK['icon']} {OCC.PACK['title']} — {OCC.PACK['price']} ₽ вместо {3 * OCC.price_from()} ₽.\n"
+               "Три любых письма с открыткой: маме, другу, любимому, на день рождения… "
+               "Письма из набора не сгорают — пишешь, когда появится повод.")
+    if D.receipt_required:
+        STATES.setdefault(peer, {}).update(email_for=order["order_id"])
+        return send(peer, "📧 Куда прислать чек об оплате? Напиши почту одним сообщением.")
+    pay_link(peer, order)
+
+
+def use_credit(peer):
+    st = STATES.get(peer) or {}
+    profile = client_get(peer)
+    if st.get("step") != "pay" or profile.get("credits", 0) < 1:
+        return send(peer, "Не получилось — начнём заново?", [[btn("💌 Каталог", {"c": "cat"}, "primary")]])
+    profile["credits"] -= 1
+    client_save(peer, profile)
+    order = make_order(peer, st, price=0, status="done")
+    order.update(paid_at=D.now_msk().isoformat(), delivered_at=D.now_msk().isoformat(), paid_by="credit")
+    D.save_order(order)
+    STATES.pop(peer, None)
+    deliver(order, f"🎁 Списано из набора. Осталось: {profile['credits']}.")
+    D.notify_paid(order)
+
+
 def buy(peer):
     st = STATES.get(peer) or {}
     if st.get("step") != "pay":
         return send(peer, "Заказ устарел — начнём заново?", [[btn("💌 Каталог", {"c": "cat"}, "primary")]])
-    p = OCC.PRODUCTS[st["product"]]
-    order = {
-        "order_id": D.new_order_id(), "chat_id": f"vk{peer}", "vk_peer": peer, "channel": "vk",
-        "name": f"{user_name(peer)} (VK)", "username": f"vk.com/id{peer}",
-        "pain": st["product"], "product": st["product"],
-        "answers": [a for _, a in st["qa"]], "qa": st["qa"], "mirror_text": None,
-        "letter_text": st["letter"], "card_title": st["card_title"], "card_line": st["card_line"],
-        "sign": st["sign"], "price_rub": p["price"], "status": "pending", "is_gift": True,
-        "gift_for": st.get("name"), "created_at": D.now_msk().isoformat(),
-        "paid_at": None, "delivered_at": None, "email": None, "rating": None,
-    }
-    D.save_order(order)
+    order = make_order(peer, st)
     remember_client(peer)
     D.notify_new(order)
     st.update(step="email" if D.receipt_required else "wait", order_id=order["order_id"])
@@ -250,7 +314,8 @@ def pay_link(peer, order, email=None):
         log.error("vk yookassa create %s: %s", order["order_id"], exc)
         return send(peer, f"⚠️ Не смог открыть страницу оплаты. Попробуй через минуту.\nЗаказ {order['order_id']}",
                     [[btn("Ещё раз", {"c": "repay", "o": order["order_id"]}, "primary")]])
-    STATES.setdefault(peer, {}).update(step="wait", order_id=order["order_id"])
+    if order["product"] != OCC.PACK["key"]:
+        STATES.setdefault(peer, {}).update(step="wait", order_id=order["order_id"])
     send(peer, f"Заказ {order['order_id']} · {order['price_rub']} ₽\n\n"
                "Оплата — на защищённой странице ЮKassa: СБП, SberPay, T-Pay, карта или ЮMoney.\n"
                "После оплаты письмо и открытка придут сюда сами в течение минуты 🤍",
@@ -279,9 +344,23 @@ def check(peer, order_id):
 def on_paid(order):
     """Вызывается из bot_best.fulfill_order после подтверждённой оплаты."""
     peer = order["vk_peer"]
+    receipt = f"\nЧек придёт на {order['email']}" if order.get("email") else ""
+    if order.get("product") == OCC.PACK["key"]:
+        profile = client_get(peer) or {"vk_id": peer, "created_at": D.now_msk().isoformat(), "source": "vk_dm"}
+        profile["credits"] = profile.get("credits", 0) + OCC.PACK["credits"]
+        client_save(peer, profile)
+        st = STATES.get(peer) or {}
+        rows = ([[btn("🎁 Забрать это письмо по набору", {"c": "credit"}, "positive")]] if st.get("step") == "pay"
+                else [[btn("🎀 Написать первое письмо", {"c": "cat"}, "primary")]])
+        return send(peer, f"✅ Оплата прошла. В твоём наборе: {profile['credits']} письма с открыткой 🎁\n"
+                          "Выбирай повод — оплачивать больше не нужно." + receipt, rows)
     STATES.pop(peer, None)
-    send(peer, f"✅ Оплата прошла · заказ {order['order_id']}"
-               + (f"\nЧек придёт на {order['email']}" if order.get("email") else ""))
+    deliver(order, f"✅ Оплата прошла · заказ {order['order_id']}" + receipt)
+
+
+def deliver(order, header):
+    peer = order["vk_peer"]
+    send(peer, header)
     photo, link = card_attachment(peer, postcards.render(order["product"], order.get("card_title", ""),
                                                          order.get("card_line", ""), order.get("sign", "")))
     send(peer, "🖼 Твоя открытка" + link, attachment=photo)
@@ -365,6 +444,10 @@ def _route(peer, msg, service_key):
         store(peer, payload.get("t", "simple"))
     elif cmd == "buy":
         buy(peer)
+    elif cmd == "pack":
+        buy_pack(peer)
+    elif cmd == "credit":
+        use_credit(peer)
     elif cmd == "cancel":
         STATES.pop(peer, None)
         send(peer, "Отменила. Если захочешь вернуться — напиши «каталог» 🤍")
@@ -394,6 +477,11 @@ def _route(peer, msg, service_key):
             send(peer, "Слишком длинно — сократи до 1500 знаков, пожалуйста.")
         else:
             store(peer, text)
+    elif st.get("email_for") and "@" in text:
+        order = D.get_order(st.pop("email_for"))
+        order["email"] = text
+        D.save_order(order)
+        pay_link(peer, order, text)
     elif st.get("step") == "email":
         if "@" not in text or "." not in text.split("@")[-1] or " " in text:
             send(peer, "Не похоже на почту 🙈 Напиши, пожалуйста, в виде name@mail.ru")

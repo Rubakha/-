@@ -159,6 +159,26 @@ assert last_text().count("готово и ждёт") == 1 and len([1 for m, p in
 say("Не нужно", {"c": "drop", "o": oid})
 assert B.get_order(oid)["status"] == "cancelled"
 
+# набор «3 письма»: покупка с экрана превью, потом списание по набору
+PAY.update(status="pending", paid=False)
+S.STATES.clear()
+say("✍️ Начать", {"c": "go", "k": "love"})
+for qkey, _ in S.questions("love"):
+    say("😊 Тепло и с юмором", {"c": "tone", "t": "warm"}) if qkey == "tone" else say("Аня" if qkey == "name" else "Помню всё")
+assert "3 письма — 449 ₽" in json.dumps(last_kb(), ensure_ascii=False)
+say("🎁 3 письма — 449 ₽", {"c": "pack"})
+pack_id = [o for o in B.all_orders() if o.get("product") == "pack3"][0]["order_id"]
+assert S.STATES[PEER]["step"] == "pay", "превью потерялось после покупки набора"
+PAY.update(status="succeeded", paid=True)
+B.yk_request = lambda m, u, payload=None, idem=None: {"id": "yk-vk", "status": "succeeded", "paid": True, "amount": {"value": "449.00"}}
+B.yk_check_order(pack_id)
+assert S.client_get(PEER)["credits"] == 3 and "Забрать это письмо по набору" in json.dumps(last_kb(), ensure_ascii=False)
+say("🎁 Забрать это письмо по набору", {"c": "credit"})
+assert S.client_get(PEER)["credits"] == 2 and PEER not in S.STATES
+free = [o for o in B.all_orders() if o.get("paid_by") == "credit"][0]
+assert free["status"] == "done" and free["price_rub"] == 0 and "Осталось: 2" in json.dumps([p for m, p in VK], ensure_ascii=False)
+B.yk_request = fake_yk
+
 # переход с сайта: ref открывает нужный повод, источник «vk_site»
 VB.api = fake_vk
 SITE_PEER = 888
@@ -167,7 +187,7 @@ VB.handle({"type": "message_new", "object": {"message": {"from_id": SITE_PEER, "
 assert "Любовное письмо" in last_text(), last_text()
 
 stats = B.bot_stats()
-assert stats["sources"].get("vk_dm") == 1 and stats["sources"].get("vk_site") == 1 and stats["paid_total"] == 1, stats
+assert stats["sources"].get("vk_dm") == 1 and stats["sources"].get("vk_site") == 1 and stats["revenue_total"] == 199 + 449, stats
 # без прав на фото открытка уходит ссылкой на картинку
 VB.api = lambda method, **p: (_ for _ in ()).throw(RuntimeError("no photos")) if method.startswith("photos.") else fake_vk(method, **p)
 att, link = S.card_attachment(PEER, b"\xff\xd8jpg")
