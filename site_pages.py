@@ -181,7 +181,7 @@ def card(key):
 
 # коды подтверждения прав (не секреты): Яндекс Вебмастер — файл yandex_<код>.html
 YANDEX_CODES = {"0c8acc3e8bcc9a6a"}
-GOOGLE_FILES = set()  # google<код>.html, если подтверждать Search Console файлом
+GOOGLE_FILES = {"3bbc16587d47115e"}  # google<код>.html — Search Console
 
 
 def verify_yandex(code):
