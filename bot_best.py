@@ -3248,6 +3248,7 @@ def channel_rss_items(limit=15):
             continue
         text_m = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', block, re.S)
         raw = text_m.group(1) if text_m else ""
+        start = re.search(r'href="https?://t\.me/' + BOT_USERNAME + r'(?:\?start=([\w-]+))?"', raw)
         raw = re.sub(r"<br\s*/?>", "\n", raw)
         raw = re.sub(r"<i class=\"emoji\"[^>]*><b>(.*?)</b></i>", r"\1", raw)
         text = html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
@@ -3255,8 +3256,27 @@ def channel_rss_items(limit=15):
         if not text and not photo:
             continue
         items.append({"link": f"https://t.me/{pid.group(1)}", "date": when.group(1),
-                      "text": text, "photo": photo.group(1) if photo else None})
+                      "text": text, "photo": photo.group(1) if photo else None,
+                      "bot_start": (start.group(1) or "occ") if start else None})
     return items[-limit:]
+
+
+VK_CHAT = "vk.me/alisanevskaya_diary"
+
+
+def vk_adapt(item):
+    """Пост канала для стены VK: ссылки на Telegram-бота → заказ прямо в сообщениях сообщества."""
+    text = item["text"]
+    bot_re = r"(?:https?://)?t\.me/" + BOT_USERNAME + r"(?:\?start=([\w-]+))?|@" + BOT_USERNAME
+    found = re.search(bot_re, text)
+    start = item.get("bot_start") or (found.group(1) or "occ" if found else None)
+    if not start:
+        return text
+    link = f"{VK_CHAT}?ref=tg_{start}"
+    text = re.sub(bot_re, link, text)
+    if link not in text:
+        text += f"\n\n💌 Заказать письмо с открыткой прямо здесь, во ВКонтакте: {link}"
+    return text
 
 
 def build_rss():
@@ -3278,7 +3298,7 @@ def build_rss():
         parts.append("<item>")
         parts.append(f"<title>{html.escape(title)}</title>")
         parts.append(f"<link>{it['link']}</link><guid>{it['link']}</guid><pubDate>{pub}</pubDate>")
-        parts.append(f"<description>{html.escape(it['text'])}</description>")
+        parts.append(f"<description>{html.escape(vk_adapt(it))}</description>")
         if it["photo"]:
             parts.append(f'<enclosure url="{html.escape(it["photo"])}" type="image/jpeg" length="0"/>')
         parts.append("</item>")

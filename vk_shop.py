@@ -423,8 +423,11 @@ def _route(peer, msg, service_key):
     cmd = payload.get("c")
     st = STATES.get(peer) or {}
     ref = msg.get("ref") or ""
-    site_key = ref[5:] if ref.startswith("site_") else ""
-    remember_client(peer, "vk_site" if site_key else "vk_service" if service_key else "vk_dm")
+    site_key = ref.split("_", 1)[1] if ref.startswith(("site_", "tg_")) else ""
+    for prefix in ("occ_", "w_"):                      # tg_occ_family → family
+        site_key = site_key[len(prefix):] if site_key.startswith(prefix) else site_key
+    remember_client(peer, "vk_site" if ref.startswith("site_") else "vk_post" if ref.startswith("tg_")
+                    else "vk_service" if service_key else "vk_dm")
 
     if site_key and not st and cmd in (None, "cat"):
         if site_key in OCC.PRODUCTS:

@@ -186,8 +186,19 @@ VB.handle({"type": "message_new", "object": {"message": {"from_id": SITE_PEER, "
            "payload": json.dumps({"command": "start"}), "ref": "site_love"}}})
 assert "Любовное письмо" in last_text(), last_text()
 
+# посты из Telegram на стене VK ведут в сообщения сообщества
+it = {"text": "Письмо папе к 18 октября → t.me/alisanevskaya_letters_bot?start=occ_family", "bot_start": None}
+assert B.vk_adapt(it) == "Письмо папе к 18 октября → vk.me/alisanevskaya_diary?ref=tg_occ_family"
+it = {"text": "Собери письмо в боте", "bot_start": "occ"}
+assert B.vk_adapt(it).endswith("vk.me/alisanevskaya_diary?ref=tg_occ")
+assert B.vk_adapt({"text": "Просто дневник", "bot_start": None}) == "Просто дневник"
+POST_PEER = 999
+VB.handle({"type": "message_new", "object": {"message": {"from_id": POST_PEER, "peer_id": POST_PEER, "text": "Начать",
+           "payload": json.dumps({"command": "start"}), "ref": "tg_occ_family"}}})
+assert "Маме, папе" in last_text(), last_text()
+
 stats = B.bot_stats()
-assert stats["sources"].get("vk_dm") == 1 and stats["sources"].get("vk_site") == 1 and stats["revenue_total"] == 199 + 449, stats
+assert stats["sources"].get("vk_dm") == 1 and stats["sources"].get("vk_site") == 1 and stats["sources"].get("vk_post") == 1 and stats["revenue_total"] == 199 + 449, stats
 # без прав на фото открытка уходит ссылкой на картинку
 VB.api = lambda method, **p: (_ for _ in ()).throw(RuntimeError("no photos")) if method.startswith("photos.") else fake_vk(method, **p)
 att, link = S.card_attachment(PEER, b"\xff\xd8jpg")
