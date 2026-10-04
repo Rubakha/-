@@ -953,6 +953,72 @@ def yk_poll_loop():
         time.sleep(15)
 
 
+# ── Одно мягкое напоминание тем, кто дошёл до превью или оплаты и не забрал письмо ──
+REMIND_AFTER = timedelta(hours=2)
+REMIND_WINDOW = timedelta(hours=26)       # позже не пишем: VK разрешает ответ в течение суток
+REMINDERS_SINCE = "2026-10-04T15:00"      # заказы до запуска напоминаний не трогаем
+
+
+def reminder_due(created, now):
+    return REMIND_AFTER <= now - created <= REMIND_WINDOW
+
+
+def send_reminders(now=None):
+    now = now or now_msk()
+    if not 10 <= now.hour < 21:
+        return
+    for o in all_orders():
+        if (o.get("status") != "pending" or o.get("reminded_at") or o.get("product") == OCC.PACK["key"]
+                or o.get("created_at", "") < REMINDERS_SINCE):
+            continue
+        try:
+            if not reminder_due(datetime.fromisoformat(o["created_at"]), now):
+                continue
+        except (KeyError, ValueError):
+            continue
+        o["reminded_at"] = now.isoformat()
+        save_order(o)
+        try:
+            if o.get("channel") == "vk":
+                import vk_shop
+                vk_shop.remind_order(o)
+            else:
+                who = f" для {esc(o['gift_for'])}" if o.get("gift_for") else ""
+                bot.send_message(o["chat_id"],
+                                 f"💌 Твоё письмо{who} готово и ждёт. Открытка уже собрана — "
+                                 "забрать можно в один клик. Если передумал(а) — просто отмени, я не обижусь 🤍",
+                                 parse_mode="HTML", reply_markup=pending_markup(o["order_id"]))
+        except Exception as exc:
+            log.error("reminder %s: %s", o["order_id"], exc)
+    for chat_id, st in list(STATES.items()):
+        at = st.get("paywall_at")
+        if st.get("step") == "occ_paywall" and at and not st.get("reminded") and reminder_due(at, now):
+            st["reminded"] = True
+            p = OCC.PRODUCTS.get(st.get("product"), {})
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton(f"🔓 Забрать письмо — {p.get('price', '')}₽", callback_data="occ:buy"))
+            kb.add(types.InlineKeyboardButton("❌ Не нужно", callback_data="letter:cancel"))
+            try:
+                bot.send_message(chat_id, f"💌 Письмо для {esc(st.get('name') or 'близкого человека')} ещё ждёт тебя — "
+                                          "я сохранила его и открытку.", parse_mode="HTML", reply_markup=kb)
+            except Exception as exc:
+                log.error("preview reminder %s: %s", chat_id, exc)
+    try:
+        import vk_shop
+        vk_shop.remind_previews(now)
+    except Exception as exc:
+        log.error("vk preview reminders: %s", exc)
+
+
+def reminder_loop():
+    while True:
+        try:
+            send_reminders()
+        except Exception as exc:
+            log.error("reminder loop: %s", exc)
+        time.sleep(600)
+
+
 def start_yk_poller():
     if yk_enabled():
         threading.Thread(target=yk_poll_loop, name="yk_poll", daemon=True).start()
@@ -1569,7 +1635,7 @@ def occ_finish(chat_id):
         return
 
     state.update(step="occ_paywall", letter=res["letter"], card_title=res["card_title"],
-                 card_line=res["card_line"], sign=sign, tone=tone, name=name)
+                 card_line=res["card_line"], sign=sign, tone=tone, name=name, paywall_at=now_msk())
     try:
         img = postcards.render(key, res["card_title"], res["card_line"], sign, preview=True)
         bot.send_photo(chat_id, img, caption="Твоя открытка (превью) 🖼")
@@ -3095,7 +3161,7 @@ def vk_shop_deps():
     return SimpleNamespace(save_order=save_order, get_order=get_order, new_order_id=new_order_id,
                            now_msk=now_msk, yk_create=yk_create, yk_check=yk_check_order,
                            receipt_required=YOOKASSA_RECEIPT, notify_new=notify_admin_new_order,
-                           envelope_url=occ_web_envelope, data_dir=DATA_DIR)
+                           envelope_url=occ_web_envelope, data_dir=DATA_DIR, reminder_due=reminder_due)
 
 
 STATS_KEY = hashlib.sha256(f"{TG_BOT_TOKEN}:stats".encode()).hexdigest()[:24]
@@ -3280,6 +3346,7 @@ if __name__ == "__main__":
         log.error("STORAGE NOT WRITABLE: %s", _where)
     start_autobackup()
     start_yk_poller()
+    threading.Thread(target=reminder_loop, name="reminders", daemon=True).start()
     try:
         import vk_bridge
         import vk_shop

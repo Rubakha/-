@@ -136,6 +136,29 @@ S.AI._call = lambda system, text, max_tokens=0: "Привет! Как ты?"
 say("привет, как дела")
 assert last_text() == "Привет! Как ты?"
 
+# напоминание через 2 часа: один раз, только днём
+from datetime import timedelta  # noqa: E402
+S.STATES.clear()
+B.REMINDERS_SINCE = "2000-01-01"
+say("✍️ Начать", {"c": "go", "k": "family"})
+for qkey, _ in S.questions("family"):
+    say("🌿 Просто, без пафоса", {"c": "tone", "t": "simple"}) if qkey == "tone" else say("Пап" if qkey == "name" else "Серёжа")
+say("🔓 Целиком — 199 ₽", {"c": "buy"})
+oid = S.STATES[PEER]["order_id"]
+created = B.datetime.fromisoformat(B.get_order(oid)["created_at"])
+n = len(VK)
+B.send_reminders(created.replace(hour=12) + timedelta(minutes=30))   # рано — молчим
+B.send_reminders(created.replace(hour=23) + timedelta(hours=3))      # ночь — молчим
+assert len(VK) == n
+noon = created.replace(hour=12) + timedelta(hours=2, minutes=5)
+o = B.get_order(oid); o["created_at"] = created.replace(hour=12).isoformat(); B.save_order(o)
+B.send_reminders(noon)
+assert "готово и ждёт" in last_text() and B.get_order(oid)["reminded_at"]
+B.send_reminders(noon + timedelta(minutes=30))
+assert last_text().count("готово и ждёт") == 1 and len([1 for m, p in VK if "готово и ждёт" in p.get("message", "")]) == 1
+say("Не нужно", {"c": "drop", "o": oid})
+assert B.get_order(oid)["status"] == "cancelled"
+
 # переход с сайта: ref открывает нужный повод, источник «vk_site»
 VB.api = fake_vk
 SITE_PEER = 888

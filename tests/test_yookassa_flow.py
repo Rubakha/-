@@ -105,4 +105,16 @@ assert order["status"] == "done" and order["charge_id"] == "yk-1" and order.get(
 n = len(SENT)
 B.yk_check_order(order_id)                                # повторная проверка не выдаёт второй раз
 assert len(SENT) == n
+# напоминание о неоплаченном заказе Telegram: одно, с кнопками оплаты/отмены
+from datetime import timedelta  # noqa: E402
+B.REMINDERS_SINCE = "2000-01-01"
+noon = B.now_msk().replace(hour=12, minute=0)
+pend = {"order_id": B.new_order_id(), "chat_id": 500, "name": "Т", "pain": "family", "product": "family",
+        "price_rub": 199, "status": "pending", "gift_for": "Пап", "created_at": (noon - timedelta(hours=2, minutes=10)).isoformat()}
+B.save_order(pend)
+n = len(SENT)
+B.send_reminders(noon)
+B.send_reminders(noon + timedelta(minutes=20))
+rem = [k for name, a, k in SENT[n:] if name == "send_message"]
+assert len(rem) == 1 and rem[0]["reply_markup"] is not None, SENT[n:]
 print("OK: yookassa flow checks passed,", len(API), "api calls")

@@ -190,7 +190,7 @@ def finish(peer):
         return send(peer, "Не получилось написать письмо прямо сейчас 😔 Попробуй через пару минут.",
                     [[btn("Попробовать снова", {"c": "go", "k": key}, "primary")]])
     st.update(step="pay", letter=res["letter"], card_title=res["card_title"],
-              card_line=res["card_line"], sign=sign, name=name)
+              card_line=res["card_line"], sign=sign, name=name, pay_at=D.now_msk())
     photo, link = card_attachment(peer, postcards.render(key, res["card_title"], res["card_line"], sign, preview=True))
     send(peer, "Твоя открытка (превью) 🖼" + link, attachment=photo)
     letter = res["letter"]
@@ -295,6 +295,26 @@ def on_paid(order):
          [[btn("🎀 Ещё одно письмо", {"c": "cat"}, "primary")]])
 
 
+def remind_order(order):
+    """Напоминание о неоплаченном заказе (вызывает bot_best.send_reminders один раз)."""
+    who = f" для {order['gift_for']}" if order.get("gift_for") else ""
+    send(order["vk_peer"], f"💌 Твоё письмо{who} готово и ждёт. Открытка уже собрана — забрать можно в один клик. "
+                           "Если передумал(а) — просто нажми «Не нужно» 🤍",
+         [[btn(f"💳 Оплатить {order['price_rub']} ₽", {"c": "repay", "o": order["order_id"]}, "positive")],
+          [btn("Не нужно", {"c": "drop", "o": order["order_id"]})]])
+
+
+def remind_previews(now):
+    """Посмотрели превью, но не нажали «Целиком»."""
+    for peer, st in list(STATES.items()):
+        at = st.get("pay_at")
+        if st.get("step") == "pay" and at and not st.get("reminded") and D.reminder_due(at, now):
+            st["reminded"] = True
+            p = OCC.PRODUCTS[st["product"]]
+            send(peer, f"💌 Письмо для {st.get('name') or 'близкого человека'} ещё ждёт — я сохранила его и открытку.",
+                 [[btn(f"🔓 Забрать — {p['price']} ₽", {"c": "buy"}, "positive")], [btn("Не нужно", {"c": "cancel"})]])
+
+
 def notify_opened(order):
     try:
         send(order["vk_peer"], f"✨ {order.get('gift_for') or 'Получатель'} только что открыл(а) твоё письмо.")
@@ -348,6 +368,13 @@ def _route(peer, msg, service_key):
     elif cmd == "cancel":
         STATES.pop(peer, None)
         send(peer, "Отменила. Если захочешь вернуться — напиши «каталог» 🤍")
+    elif cmd == "drop":
+        order = D.get_order(payload.get("o", ""))
+        if order and order.get("vk_peer") == peer and order.get("status") == "pending":
+            order["status"] = "cancelled"
+            D.save_order(order)
+        STATES.pop(peer, None)
+        send(peer, "Хорошо, отменила 🤍 Если захочешь вернуться — напиши «каталог».")
     elif cmd == "chk":
         check(peer, payload.get("o", ""))
     elif cmd == "repay":
