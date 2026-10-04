@@ -14,7 +14,7 @@ from site_content import FATHER_DAY, PAGES
 
 BOT = os.getenv("BOT_USERNAME", "alisanevskaya_letters_bot")
 SITE_URL = os.getenv("SITE_URL", "https://alisabot-w-sergeyrubakha1s.mia0.amvera.tech").rstrip("/")
-VERIFY_META = os.getenv("SITE_VERIFY_META", "")  # готовые <meta> подтверждения Яндекс/Google
+VERIFY_META = os.getenv("SITE_VERIFY_META", '<meta name="yandex-verification" content="0c8acc3e8bcc9a6a">')
 HERE = os.path.dirname(os.path.abspath(__file__))
 CARDS = os.path.join(HERE, "assets", "postcards")
 _views_lock = threading.Lock()
