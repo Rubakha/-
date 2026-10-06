@@ -1404,8 +1404,8 @@ def gift_self(call):
     safe_edit(
         call,
         "🎁 <b>Подарок</b>\n\n"
-        "Кому подарок? Напиши @username или имя друга —\n"
-        "это попадёт в заказ, чтобы я знала, для кого пишу.",
+        "Кому подарок? Напиши только имя — так, как ты его называешь.\n"
+        "Номер и логин не нужны: письмо ты отправишь сам в один тап.",
     )
     bot.answer_callback_query(call.id)
 
@@ -1418,7 +1418,7 @@ def gift_contact(message):
     chat_id = message.chat.id
     contact = (message.text or "").strip()
     if len(contact) < 2:
-        bot.send_message(chat_id, "Слишком коротко. Напиши @username или имя.")
+        bot.send_message(chat_id, "Слишком коротко. Напиши имя.")
         return
 
     bot.send_message(chat_id, f"🎁 Подарок для: {esc(contact)}", parse_mode="HTML")
@@ -1782,7 +1782,10 @@ def occ_postcard(order, preview=False):
 
 def occ_deliver(chat_id, order):
     try:
-        bot.send_photo(chat_id, occ_postcard(order), caption="🖼 Твоя открытка")
+        msg = bot.send_photo(chat_id, occ_postcard(order), caption="🖼 Твоя открытка")
+        # file_id нужен inline-отправке: открытка уходит в чат получателя от имени автора
+        order["card_file_id"] = msg.photo[-1].file_id
+        save_order(order)
     except Exception as exc:
         log.error("postcard deliver failed %s: %s", order["order_id"], exc)
     rate_kb = types.InlineKeyboardMarkup(row_width=5)
@@ -1794,18 +1797,54 @@ def occ_deliver(chat_id, order):
     share_text = f"Тебе письмо 💌 Открой конверт:"
     share_url = ("https://t.me/share/url?url=" + urllib.parse.quote(link)
                  + "&text=" + urllib.parse.quote(share_text))
+    name = (order.get("gift_for") or "").strip()
+    label = f"💌 Отправить {name}" if name and len(name) <= 20 else "💌 Отправить получателю"
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("📤 Отправить конверт получателю", url=share_url))
+    kb.add(types.InlineKeyboardButton(
+        label,
+        switch_inline_query_chosen_chat=types.SwitchInlineQueryChosenChat(
+            query=f"card_{occ_gift_code(order)}", allow_user_chats=True, allow_group_chats=True),
+    ))
+    kb.add(types.InlineKeyboardButton("📤 Отправить ссылкой (WhatsApp, другие чаты)", url=share_url))
     kb.add(types.InlineKeyboardButton("🎀 Ещё одно письмо с открыткой", callback_data="occ:catalog"))
     bot.send_message(
         chat_id,
         "✉️ <b>Как подарить</b>\n\n"
-        "1. Нажми «Отправить конверт получателю» — или скопируй ссылку:\n"
+        "Нажми «Отправить» и выбери человека из своих чатов — открытка придёт ему "
+        "от тебя, а не от бота. Номер телефона не нужен.\n"
+        "Я сообщу тебе, когда он откроет письмо ✨\n\n"
+        "Другой способ — ссылка на конверт:\n"
         f"<code>{link}</code>\n"
-        "Получатель откроет конверт в Telegram: сначала открытка, потом письмо. "
-        "Я сообщу тебе, когда его вскроют ✨\n\n"
-        "2. Или просто перешли ему открытку и письмо выше.",
+        "Или просто перешли ему открытку и письмо выше.",
         parse_mode="HTML", reply_markup=kb)
+
+
+@bot.inline_handler(func=lambda q: (q.query or "").startswith("card_"))
+def occ_inline_send(query):
+    """Автор открытки отправляет её в чат получателя в один тап."""
+    code = query.query[len("card_"):].strip()
+    ref = read_json(gift_path(code), None) if code.isalnum() else None
+    order = get_order(ref["order_id"]) if ref else None
+    if not order or order.get("status") != "done" or order.get("chat_id") != query.from_user.id:
+        bot.answer_inline_query(query.id, [], cache_time=0, is_personal=True)
+        return
+
+    who = order.get("sign") or "близкого человека"
+    name = (order.get("gift_for") or "").strip()
+    teaser = (f"💌 {name}, тебе письмо от {who}" if name else f"💌 Тебе письмо от {who}") \
+        + "\nВнутри — несколько слов, написанных специально для тебя."
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("Открыть письмо 💌", url=occ_gift_link(order)))
+    file_id = order.get("card_file_id")
+    if file_id:
+        result = types.InlineQueryResultCachedPhoto(
+            id=code, photo_file_id=file_id, caption=teaser, reply_markup=kb)
+    else:
+        result = types.InlineQueryResultArticle(
+            id=code, title="Отправить письмо 💌",
+            input_message_content=types.InputTextMessageContent(message_text=teaser),
+            reply_markup=kb)
+    bot.answer_inline_query(query.id, [result], cache_time=0, is_personal=True)
 
 
 def occ_gift_start(chat_id, code):
