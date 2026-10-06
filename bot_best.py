@@ -406,6 +406,9 @@ def safe_edit(call, text, markup=None):
 # СТАРТ
 # ─────────────────────────────────────────────────────────────
 
+VKADS_ALIASES = {"father": "family"}  # vkads_father → письмо папе
+
+
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = message.chat.id
@@ -472,6 +475,10 @@ def cmd_start(message):
             occ_open_product(chat_id, key)
         else:
             occ_open_catalog(chat_id)
+    elif len(parts) == 2 and parts[1].startswith("vkads_"):  # реклама VK: vkads_<повод>, источник = весь параметр
+        key = VKADS_ALIASES.get(parts[1][6:], parts[1][6:])
+        if key in OCC.PRODUCTS:
+            occ_open_product(chat_id, key)
 
 
 # ─────────────────────────────────────────────────────────────
