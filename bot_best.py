@@ -41,6 +41,9 @@ log = logging.getLogger("alisa")
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# Тестовые аккаунты владельца (chat_id через запятую): оплата 0 ₽ без ЮKassa, вне статистики, финансов и рассылок.
+# Задаётся только переменной окружения — в коде и в данных списка нет.
+TEST_USERS = {int(x) for x in re.split(r"[,\s]+", os.getenv("TEST_USERS", "")) if x.strip().isdigit()}
 WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").rstrip("/")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "alisanevskaya_letters_bot")
 PORT = int(os.getenv("PORT", "5000"))
@@ -268,21 +271,33 @@ def get_order(order_id):
     return read_json(order_path(order_id), None)
 
 
-def all_orders():
+def is_test_user(chat_id):
+    return bool(chat_id) and chat_id in TEST_USERS
+
+
+def all_orders(include_test=False):
+    """Тестовые заказы (is_test) по умолчанию скрыты — вся статистика, финансы и напоминания их не видят."""
     ensure_dirs()
     items = []
     for fname in os.listdir(ORDERS_DIR):
         if not fname.endswith(".json"):
             continue
         data = read_json(os.path.join(ORDERS_DIR, fname), None)
-        if data:
+        if data and (include_test or not data.get("is_test")):
             items.append(data)
     items.sort(key=lambda o: o.get("created_at", ""), reverse=True)
     return items
 
 
+def client_files():
+    """Файлы профилей клиентов без тестовых аккаунтов — для статистики и рассылок."""
+    ensure_dirs()
+    return [f for f in os.listdir(CLIENTS_DIR)
+            if f.endswith(".json") and not (f[:-5].isdigit() and int(f[:-5]) in TEST_USERS)]
+
+
 def client_orders(chat_id):
-    return [o for o in all_orders() if o.get("chat_id") == chat_id]
+    return [o for o in all_orders(include_test=True) if o.get("chat_id") == chat_id]
 
 
 def new_order_id():
@@ -760,6 +775,8 @@ def order_description(order):
 def send_order_invoice(chat_id, order):
     """Отправляет окно оплаты для заказа. Возвращает True при успехе."""
     order_id = order["order_id"]
+    if is_test_user(chat_id):
+        return send_test_payment(chat_id, order)
     if yk_enabled():
         return send_yk_payment(chat_id, order)
     if not YOOKASSA_PROVIDER_TOKEN:
@@ -792,6 +809,36 @@ def send_order_invoice(chat_id, order):
             parse_mode="HTML",
         )
         return False
+
+
+# ── Тестовая оплата 0 ₽ (только chat_id из TEST_USERS) ────────
+def send_test_payment(chat_id, order):
+    """Вместо ЮKassa — кнопка «Оплатить 0 ₽». Заказ помечается is_test и выпадает из статистики."""
+    order["is_test"] = True
+    order.setdefault("test_price_rub", order.get("price_rub"))
+    order["price_rub"] = 0
+    save_order(order)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🧪 Оплатить 0 ₽ (тест)", callback_data=f"test:pay:{order['order_id']}"))
+    bot.send_message(
+        chat_id,
+        f"🧪 <b>Тестовый режим</b> · заказ <code>{order['order_id']}</code>\n"
+        f"Настоящая цена — {order['test_price_rub']}₽, сейчас платить не нужно.",
+        parse_mode="HTML", reply_markup=kb,
+    )
+    return True
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("test:pay:"))
+def test_pay(call):
+    order = get_order(call.data.split(":", 2)[2])
+    chat_id = call.message.chat.id
+    if (not is_test_user(call.from_user.id) or not order or not order.get("is_test")
+            or order.get("chat_id") != chat_id or order.get("status") != "pending"):
+        bot.answer_callback_query(call.id, "Недоступно")
+        return
+    bot.answer_callback_query(call.id, "Тестовая оплата ✅")
+    fulfill_order(chat_id, order["order_id"], f"test-{secrets.token_hex(4)}", None)
 
 
 # ── Оплата на странице ЮKassa ────────────────────────────────
@@ -1133,7 +1180,7 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     if profile:
         profile["total_spent_rub"] = profile.get("total_spent_rub", 0) + order["price_rub"]
         write_json(client_path(chat_id), profile)
-        inviter_id = profile.get("referred_by")
+        inviter_id = None if order.get("is_test") else profile.get("referred_by")
         if inviter_id:
             inviter = get_client(inviter_id)
             if inviter:
@@ -2127,7 +2174,8 @@ def notify_admin_new_order(order):
     gift = f"\n🎁 Подарок для: {esc(order['gift_for'])}" if order.get("is_gift") else ""
     safe_send(
         ADMIN_ID,
-        "🆕 <b>Заказ создан</b> (ждёт оплаты)\n\n"
+        ("🧪 <b>ТЕСТ</b> · " if order.get("is_test") else "")
+        + "🆕 <b>Заказ создан</b> (ждёт оплаты)\n\n"
         f"{esc(order['name'])} (@{esc(order.get('username')) or '—'}){gift}\n"
         f"{meta['icon']} {meta['title']} · {order['price_rub']}₽\n"
         f"<code>{order['order_id']}</code>",
@@ -2161,7 +2209,8 @@ def notify_admin_paid(order):
     letter_preview = esc(letter_text if len(letter_text) <= 250 else letter_text[:250] + "…")
     safe_send(
         ADMIN_ID,
-        "💳 <b>ОПЛАЧЕНО, письмо отправлено</b>\n\n"
+        ("🧪 <b>ТЕСТ, 0 ₽ — в статистику не идёт</b>\n" if order.get("is_test") else "")
+        + "💳 <b>ОПЛАЧЕНО, письмо отправлено</b>\n\n"
         f"{esc(order['name'])} (@{esc(order.get('username')) or '—'}){gift}{who}{email_line}\n"
         f"{meta['icon']} {meta['title']} · {order['price_rub']}₽\n\n"
         f"Письмо (начало):\n<i>{letter_preview}</i>\n\n"
@@ -2253,7 +2302,7 @@ def admin_stats(message):
     ) or "  —"
 
     ensure_dirs()
-    clients_total = len([f for f in os.listdir(CLIENTS_DIR) if f.endswith(".json")])
+    clients_total = len(client_files())
 
     bot.send_message(
         message.chat.id,
@@ -2843,7 +2892,7 @@ def admin_reply(message):
 @bot.message_handler(func=lambda m: admin_only(m) and m.text == "📮 Рассылка")
 def mailing_start(message):
     ensure_dirs()
-    total = len([f for f in os.listdir(CLIENTS_DIR) if f.endswith(".json")])
+    total = len(client_files())
     STATES[message.chat.id] = {"step": "mailing_text"}
     bot.send_message(
         message.chat.id,
@@ -2893,7 +2942,7 @@ def mailing_send(call):
 
     ensure_dirs()
     ids = []
-    for fname in os.listdir(CLIENTS_DIR):
+    for fname in client_files():
         if fname.endswith(".json"):
             try:
                 ids.append(int(fname[:-5]))
@@ -3266,9 +3315,7 @@ def bot_stats(days=62):
         return daily.setdefault(key, {"new_clients": 0, "orders": 0, "paid": 0, "revenue": 0})
 
     sources, products, clients_total, pending = {}, {}, 0, 0
-    for fname in os.listdir(CLIENTS_DIR):
-        if not fname.endswith(".json"):
-            continue
+    for fname in client_files():
         c = read_json(os.path.join(CLIENTS_DIR, fname), None) or {}
         clients_total += 1
         d = (c.get("created_at") or "")[:10]
