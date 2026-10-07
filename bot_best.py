@@ -473,8 +473,7 @@ def cmd_start(message):
         f"Не советы — разговор.\n"
         f"{invited}\n"
         + (f"{stats}\n" if stats else "")
-        + "Начало твоего письма — бесплатно.\n"
-        f"Целиком — {LETTER_PRICE_RUB}₽, сразу в чате."
+        + "Выбери внизу, с чего начать 🤍"
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb_client())
 
