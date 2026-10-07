@@ -187,3 +187,11 @@ def report(days=30):
         "pc_next": counts.get("pc_next", 0), "retext": counts.get("retext", 0),
         "retext_wish": counts.get("retext_wish", 0), "statuses": statuses, "top": top,
     }
+
+
+def preview_chats(days):
+    """chat_id всех, кому за период показали превью письма с открыткой (тестовые аккаунты в события не пишутся)."""
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with closing(_connect()) as c:
+        return {r["chat_id"] for r in c.execute(
+            "SELECT DISTINCT chat_id FROM events WHERE name='preview' AND ts>=?", (since,))}

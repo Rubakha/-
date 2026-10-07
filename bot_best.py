@@ -30,6 +30,7 @@ import group_letters
 import occasions as OCC
 import partners
 import postcards
+import sources
 
 try:
     import ai_assistant as AI
@@ -282,8 +283,10 @@ def add_referral(inviter_id, new_id):
 
 
 def save_order(order):
-    write_json(order_path(order["order_id"]), order)
     profile = get_client(order["chat_id"])
+    if "source" not in order and profile and profile.get("source"):
+        order["source"] = profile["source"]  # источник первого захода клиента — в заказ (first touch)
+    write_json(order_path(order["order_id"]), order)
     if profile is not None:
         if order["order_id"] not in profile.get("orders", []):
             profile.setdefault("orders", []).append(order["order_id"])
@@ -507,6 +510,48 @@ def safe_edit(call, text, markup=None):
 # СТАРТ
 # ─────────────────────────────────────────────────────────────
 
+def sources_report():
+    """Воронка по источникам для /stats: источник -> старты, превью, оплаты, выручка за 7 и 30 дней."""
+    out = {}
+    for d in (7, 30):
+        rows, total = sources.report(d)
+        out[str(d)] = {"total": total, "rows": rows}
+    return out
+
+
+SOURCE_PREFIXES = ("ig_", "vk_", "yt_", "pin_", "tg_", "ad_")   # соцсети, посевы: ig_<тема>, ad_<канал>
+SOURCE_TOPICS = {"father": "family", "mother": "family", "mama": "family", "papa": "family",
+                 "parents": "family", "denotca": "family", "ny": "newyear", "birthday": "birthday",
+                 "love": "love", "thanks": "thanks", "sorry": "sorry"}
+
+
+def source_label(param):
+    """Метка источника по параметру /start. Первый заход (first touch) закрепляется в профиле."""
+    if param.startswith("g_"):
+        return "gift"
+    if param.startswith("ref_"):
+        return "ref"
+    if param.startswith("grp_"):
+        return "group"
+    if param.startswith("w_"):
+        return "web"
+    if param.startswith("v_"):
+        return "vk"
+    if param.startswith("pinvite_"):
+        return "partner_invite"
+    return param[:40] if param.startswith("p_") else param.lower()[:40]
+
+
+def source_topic_key(param):
+    """Тема после префикса ig_/vk_/yt_/pin_/tg_ -> ключ повода или None (тогда просто меню)."""
+    topic = param.split("_", 1)[1].lower() if "_" in param else ""
+    for cand in (topic, topic.replace("-", "_").split("_")[0]):
+        key = SOURCE_TOPICS.get(cand, cand)
+        if key in OCC.PRODUCTS:
+            return key
+    return None
+
+
 VKADS_ALIASES = {"father": "family"}  # vkads_father → письмо папе
 
 
@@ -528,10 +573,7 @@ def cmd_start(message):
     is_new = profile is not None and profile.get("created_at", "") >= (now_msk() - timedelta(minutes=1)).isoformat()
     if is_new and "source" not in profile:
         # первая точка входа для аналитики: pdf / occ / g_<код> / ref_<id> / direct
-        src = parts[1] if len(parts) == 2 else "direct"
-        profile["source"] = ("gift" if src.startswith("g_") else "ref" if src.startswith("ref_")
-                             else "group" if src.startswith("grp_")
-                             else "web" if src.startswith("w_") else "vk" if src.startswith("v_") else src[:32])
+        profile["source"] = source_label(parts[1] if len(parts) == 2 else "direct")
         write_json(client_path(chat_id), profile)
 
     if chat_id == ADMIN_ID:
@@ -595,6 +637,12 @@ def cmd_start(message):
         if key in OCC.PRODUCTS:
             occ_open_product(chat_id, key)
         else:
+            occ_open_catalog(chat_id)
+    elif len(parts) == 2 and parts[1].startswith(SOURCE_PREFIXES):  # ig_/vk_/yt_/pin_/tg_<тема>, ad_<канал>
+        key = None if parts[1].startswith("ad_") else source_topic_key(parts[1])
+        if key:
+            occ_open_product(chat_id, key)
+        elif parts[1].startswith("ad_"):
             occ_open_catalog(chat_id)
     elif len(parts) == 2 and parts[1].startswith("vkads_"):  # реклама VK: vkads_<повод>, источник = весь параметр
         key = VKADS_ALIASES.get(parts[1][6:], parts[1][6:])
@@ -3674,6 +3722,7 @@ def start_autobackup():
 group_letters.register(sys.modules[__name__])  # до fallback: его обработчик ловит любой текст
 calendar_reminders.register(sys.modules[__name__])
 partners.register(sys.modules[__name__])
+sources.register(sys.modules[__name__])
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -3861,6 +3910,7 @@ def bot_stats(days=62):
         "groups": group_letters.report(),
         "calendar": calendar_reminders.report(days),
         "partners": partners.report(),
+        "sources_funnel": sources_report(),
     }
 
 
