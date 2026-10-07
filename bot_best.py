@@ -2385,33 +2385,77 @@ def card_note_start(call):
         return
     target = int(call.data.split(":", 2)[2])
     profile = get_client(target) or {}
-    STATES[ADMIN_ID] = {"step": "card_note", "target": target}
+    STATES[ADMIN_ID] = {"step": "card_note", "target": target, "ts": time.time()}
     current = profile.get("notes") or "пусто"
     bot.send_message(
         ADMIN_ID,
         f"📝 Заметка о {esc(profile.get('name', target))}\n\n"
         f"Сейчас: <i>{esc(current)}</i>\n\n"
-        "Пришли новый текст — перезапишет. /cancel — отмена.",
+        "Пришли новый текст — я покажу его и спрошу, сохранять ли. "
+        f"/cancel — отмена. Ожидание — {CARD_NOTE_TTL // 60} мин.",
         parse_mode="HTML",
     )
     bot.answer_callback_query(call.id)
 
 
+CARD_NOTE_TTL = 300  # секунд: после этого «ожидание заметки» сбрасывается само
+
+
+def card_note_active(m):
+    st = STATES.get(m.chat.id, {})
+    if st.get("step") != "card_note":
+        return False
+    if time.time() - st.get("ts", 0) > CARD_NOTE_TTL:
+        STATES.pop(m.chat.id, None)  # протухло — сообщение не перехватываем
+        return False
+    return True
+
+
 @bot.message_handler(
-    func=lambda m: admin_only(m)
-    and STATES.get(m.chat.id, {}).get("step") == "card_note"
-    and m.content_type == "text"
+    func=lambda m: admin_only(m) and m.content_type == "text" and card_note_active(m)
 )
 def card_note_save(message):
-    target = STATES[message.chat.id]["target"]
-    STATES.pop(message.chat.id, None)
-    profile = get_client(target)
-    if not profile:
-        bot.send_message(message.chat.id, "Клиент не найден.")
+    st = STATES[message.chat.id]
+    text = (message.text or "").strip()
+    if text.startswith("/"):
         return
-    profile["notes"] = message.text.strip()
-    write_json(client_path(target), profile)
-    bot.send_message(message.chat.id, "✅ Заметка сохранена.")
+    st["pending_text"] = text
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✅ Сохранить заметку", callback_data="card:notesave"),
+        types.InlineKeyboardButton("✖️ Отмена", callback_data="card:notecancel"),
+    )
+    profile = get_client(st["target"]) or {}
+    bot.send_message(
+        message.chat.id,
+        f"Сохранить как заметку о {esc(profile.get('name', st['target']))}?\n\n"
+        f"<i>{esc(text[:600])}</i>",
+        parse_mode="HTML", reply_markup=kb,
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data in ("card:notesave", "card:notecancel"))
+def card_note_confirm(call):
+    if call.message.chat.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Недоступно")
+        return
+    st = STATES.get(ADMIN_ID, {})
+    if st.get("step") != "card_note" or not st.get("pending_text"):
+        bot.answer_callback_query(call.id, "Уже неактуально")
+        return
+    STATES.pop(ADMIN_ID, None)
+    if call.data == "card:notecancel":
+        bot.answer_callback_query(call.id, "Отменено")
+        bot.send_message(ADMIN_ID, "Заметка не сохранена.")
+        return
+    profile = get_client(st["target"])
+    if not profile:
+        bot.answer_callback_query(call.id, "Клиент не найден")
+        return
+    profile["notes"] = st["pending_text"]
+    write_json(client_path(st["target"]), profile)
+    bot.answer_callback_query(call.id, "Сохранено")
+    bot.send_message(ADMIN_ID, "✅ Заметка сохранена.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("card:tags:"))
@@ -2518,12 +2562,7 @@ def admin_regenerate(chat_id, order_id):
         bot.send_message(chat_id, "🤖 Помощник выключен — перегенерировать нечем.")
         return
 
-    safe_send(
-        chat_id,
-        client_card(order["chat_id"], exclude_order=order_id),
-        markup=kb_card(order["chat_id"], order_id=order_id),
-    )
-
+    STATES.pop(chat_id, None)  # сбросить зависшее «ожидание заметки» и прочие шаги админа
     bot.send_chat_action(chat_id, "typing")
     meta = pain_meta(order)
     draft = AI.generate_letter(
@@ -2545,6 +2584,11 @@ def admin_regenerate(chat_id, order_id):
         f"✏️ <b>Новый вариант для {esc(order['name'])}</b>{gift}\n"
         f"{meta['icon']} {meta['title']}\n{'─' * 25}\n\n",
         kb,
+    )
+    safe_send(  # карточка — после варианта, чтобы кнопка «Заметка» не стояла перед текстом письма
+        chat_id,
+        client_card(order["chat_id"], exclude_order=order_id),
+        markup=kb_card(order["chat_id"], order_id=order_id),
     )
 
 
