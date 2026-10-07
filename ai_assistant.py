@@ -429,18 +429,26 @@ LENGTH_HINTS = {
 
 
 def generate_occasion(brief: str, product_key: str, qa: list, tone: str,
-                      sign: str, default_title: str) -> dict:
+                      sign: str, default_title: str, previous: str = "", wish: str = "") -> dict:
     """Письмо к поводу + текст для открытки.
 
-    qa — список пар (вопрос, ответ). Возвращает
+    qa — список пар (вопрос, ответ). previous — прошлый вариант письма (при «Изменить текст»:
+    пишем иначе), wish — пожелание заказчика к правке. Возвращает
     {"letter": str, "card_title": str, "card_line": str}.
     """
     joined = "\n".join(f"— {q}\n  Ответ: {a}" for q, a in qa)
     length = LENGTH_HINTS.get(product_key, "220–340 слов.")
+    redo = ""
+    if previous:
+        redo += ("\nЭто новый вариант: прошлое письмо заказчику не подошло. Пиши иначе — другие образы, "
+                 "другое начало и ритм, но те же факты из ответов. Прошлый вариант (повторять нельзя):\n"
+                 f"{previous[:900]}\n")
+    if wish:
+        redo += f"\nПожелание заказчика к тексту (важнее всего, остальное сохрани): {wish[:500]}\n"
     prompt = f"""Повод: {brief}.
 Ответы заказчика:
 {joined}
-
+{redo}
 Тон: {TONE_HINTS.get(tone, TONE_HINTS['simple'])}.
 Подпись в конце письма: {sign}.
 Длина и форма: {length}

@@ -1,17 +1,23 @@
 """Открытка к письму: фото-фон сверху, «бумага» снизу, заголовок с именем,
 рукописная строка и подпись. PIL, без внешних сервисов.
 
-render(product_key, title, line, sign, preview=False) -> bytes (JPEG 1080×1350)
+render(product_key, title, line, sign, preview=False, card_ref=None) -> bytes (JPEG 1080×1350)
+
+card_ref — ссылка на картинку из базы (cardbase): "<повод>-<файл>" — фон как есть,
+"<повод>-<файл>~<seed>" — тот же фон в композиции с реквизитом Алисы (цветокоррекция
+и раскладка выбираются детерминированно по seed, поэтому вариант воспроизводится).
+Без card_ref берётся первый фон повода.
 """
 import io
 import os
 import random
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 FONTS = os.path.join(BASE, "assets", "fonts")
 BGS = os.path.join(BASE, "assets", "postcards")
+PROPS = os.path.join(BASE, "assets", "props")
 
 W, H = 1080, 1350
 PHOTO_H = 800
@@ -58,8 +64,83 @@ def _fit(draw, text, fname, variation, start, minimum, max_w, max_lines):
     return f, _wrap(draw, text, f, max_w)[:max_lines]
 
 
-def _background(product_key):
-    path = os.path.join(BGS, f"{product_key}.jpg")
+def split_ref(card_ref):
+    """'birthday-001~3' -> ('birthday-001', 3); без ~ seed = 0."""
+    base, _, seed = (card_ref or "").partition("~")
+    return base, int(seed) if seed.isdigit() else 0
+
+
+def bg_path(card_id):
+    """Путь к файлу фона по id карточки '<повод>-<файл>'."""
+    occ, _, stem = card_id.partition("-")
+    return os.path.join(BGS, occ, f"{stem}.jpg")
+
+
+def first_ref(product_key):
+    folder = os.path.join(BGS, product_key)
+    files = sorted(f for f in os.listdir(folder) if f.endswith(".jpg")) if os.path.isdir(folder) else []
+    return f"{product_key}-{files[0][:-4]}" if files else None
+
+
+GRADES = {
+    "none": None,
+    "warm": ((255, 226, 190), 0.16),
+    "soft": ((236, 238, 250), 0.14),
+    "sepia": ((214, 188, 150), 0.24),
+    "rose": ((244, 208, 208), 0.18),
+    "sage": ((206, 222, 200), 0.18),
+}
+PROP_FILES = ["dried_bouquet", "olive_branch", "ribbon_bow", "envelope_cream", "envelope_kraft",
+              "gift_tag", "lace_doily", "stamps_key", "tea_cup", "postcard"]
+CORNERS = ["bl", "br", "tl", "tr"]
+
+
+def _grade(im, name):
+    spec = GRADES.get(name)
+    if not spec:
+        return im
+    tint, k = spec
+    return Image.blend(im, Image.new("RGB", im.size, tint), k)
+
+
+def _place_prop(photo, prop_name, corner, rnd):
+    path = os.path.join(PROPS, prop_name + ".png")
+    if not os.path.exists(path):
+        return
+    prop = Image.open(path).convert("RGBA")
+    h = rnd.randint(200, 290)
+    prop = prop.resize((round(prop.width * h / prop.height), h), Image.LANCZOS)
+    prop = prop.rotate(rnd.randint(-38, 38), resample=Image.BICUBIC, expand=True)
+    shadow = Image.new("RGBA", prop.size, (0, 0, 0, 0))
+    shadow.putalpha(prop.getchannel("A").point(lambda a: int(a * 0.35)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+    inset_x, inset_y = rnd.randint(-70, 30), rnd.randint(-40, 40)
+    x = inset_x if corner[1] == "l" else W - prop.width - inset_x
+    y = inset_y if corner[0] == "t" else PHOTO_H - 120 - prop.height - inset_y  # выше зоны перехода в бумагу
+    y = max(-60, min(y, PHOTO_H - 120 - prop.height + 40))
+    photo.paste(shadow, (x + 8, y + 12), shadow)
+    photo.paste(prop, (x, y), prop)
+
+
+def compose(photo, seed):
+    """Фон + реквизит Алисы: цветокоррекция и раскладка по seed (воспроизводимо)."""
+    rnd = random.Random(f"alisa-card-{seed}")
+    photo = _grade(photo, rnd.choice(list(GRADES)))
+    names = rnd.sample(PROP_FILES, rnd.choice([1, 2, 2, 3]))
+    for name, corner in zip(names, rnd.sample(CORNERS, len(names))):
+        _place_prop(photo, name, corner, rnd)
+    if rnd.random() < 0.5:  # лёгкое затемнение по краям
+        vig = Image.new("L", photo.size, 0)
+        ImageDraw.Draw(vig).ellipse([-W // 4, -PHOTO_H // 4, W + W // 4, PHOTO_H + PHOTO_H // 4], fill=255)
+        vig = vig.filter(ImageFilter.GaussianBlur(120))
+        dark = ImageEnhance.Brightness(photo).enhance(0.82)
+        photo = Image.composite(photo, dark, vig)
+    return photo
+
+
+def _background(product_key, card_ref=None):
+    base, seed = split_ref(card_ref or first_ref(product_key))
+    path = bg_path(base) if base else ""
     if not os.path.exists(path):
         return Image.new("RGB", (W, PHOTO_H), (200, 180, 160))
     im = Image.open(path).convert("RGB")
@@ -67,7 +148,8 @@ def _background(product_key):
     im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
     x = (im.width - W) // 2
     y = (im.height - PHOTO_H) // 2
-    return im.crop((x, y, x + W, y + PHOTO_H))
+    im = im.crop((x, y, x + W, y + PHOTO_H))
+    return compose(im, f"{base}~{seed}") if seed else im
 
 
 def _paper_texture():
@@ -82,9 +164,9 @@ def _paper_texture():
     return paper
 
 
-def render(product_key, title, line, sign, preview=False):
+def render(product_key, title, line, sign, preview=False, card_ref=None):
     card = _paper_texture()
-    photo = _background(product_key)
+    photo = _background(product_key, card_ref)
     # фото плавно переходит в бумагу
     mask = Image.new("L", (W, PHOTO_H), 255)
     md = ImageDraw.Draw(mask)

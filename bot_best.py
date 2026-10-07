@@ -23,6 +23,7 @@ from flask import Flask, request
 from telebot import TeleBot, types
 from telebot.types import LabeledPrice, Update
 
+import cardbase
 import occasions as OCC
 import postcards
 
@@ -125,6 +126,22 @@ STATES = {}
 def ensure_dirs():
     for path in (DATA_DIR, ORDERS_DIR, CLIENTS_DIR, ANKETAS_DIR, EXPORTS_DIR, GIFTS_DIR):
         os.makedirs(path, exist_ok=True)
+
+
+try:
+    cardbase.init(DATA_DIR, postcards.BGS)
+except Exception as _exc:  # открытки продолжат работать с первым фоном повода
+    log.error("cardbase init: %s", _exc)
+
+
+def cb_event(chat_id, name, occasion=None, card_ref=None):
+    """Событие для метрик открыток; тестовые аккаунты и сбои базы игнорируем."""
+    if is_test_user(chat_id):
+        return
+    try:
+        cardbase.log_event(chat_id, name, occasion, card_ref)
+    except Exception as exc:
+        log.error("cardbase event %s: %s", name, exc)
 
 
 def storage_check():
@@ -1687,30 +1704,190 @@ def occ_finish(chat_id):
         log.error("occasion generation failed: %s", res["letter"])
         return
 
+    ref = cardbase_pick(chat_id, key, [])
     state.update(step="occ_paywall", letter=res["letter"], card_title=res["card_title"],
-                 card_line=res["card_line"], sign=sign, tone=tone, name=name, paywall_at=now_msk())
-    try:
-        img = postcards.render(key, res["card_title"], res["card_line"], sign, preview=True)
-        bot.send_photo(chat_id, img, caption="Твоя открытка (превью) 🖼")
-    except Exception as exc:
-        log.error("postcard preview failed: %s", exc)
+                 card_line=res["card_line"], sign=sign, tone=tone, name=name, paywall_at=now_msk(),
+                 card_ref=ref, card_seen=[ref] if ref else [], retexts=0, wish_used=False,
+                 default_title=default_title)
+    occ_send_preview(chat_id, state)
 
-    letter = res["letter"]
-    cut = max(220, int(len(letter) * 0.4))
-    preview = letter[:cut].rsplit(" ", 1)[0] + "…"
-    credits = (get_client(chat_id) or {}).get("credits", 0)
+
+FREE_RETEXTS = 2  # бесплатных перегенераций текста; дальше — одна правка по пожеланию
+
+
+def cardbase_pick(chat_id, key, seen):
+    try:
+        return cardbase.pick_ref(chat_id, key, seen)
+    except Exception as exc:
+        log.error("cardbase pick: %s", exc)
+        return None
+
+
+def occ_masked_preview(letter):
+    """Первая половина письма читается, вторая — «матовое стекло» из ▒ (спойлер Telegram не годится:
+    он открывается одним тапом)."""
+    cut = max(220, len(letter) // 2)
+    head = letter[:cut].rsplit(None, 1)[0] if " " in letter[:cut] else letter[:cut]
+    tail = re.sub(r"\S", "▒", letter[len(head):]).strip()
+    tail = re.sub(r"\n{3,}", "\n\n", tail)
+    return esc(head) + "…\n\n<code>" + tail[:420] + ("…" if len(tail) > 420 else "") + "</code>"
+
+
+def occ_preview_markup(state):
+    p = OCC.PRODUCTS[state["product"]]
+    credits = (get_client(state.get("chat_id", 0)) or {}).get("credits", 0)
     kb = types.InlineKeyboardMarkup(row_width=1)
     if credits:
         kb.add(types.InlineKeyboardButton(f"🎁 Забрать по набору (осталось {credits})",
                                           callback_data="occ:credit"))
-    kb.add(types.InlineKeyboardButton(f"🔓 Письмо и открытка целиком — {p['price']}₽",
-                                      callback_data="occ:buy"))
+    kb.add(types.InlineKeyboardButton(f"💳 Оплатить — {p['price']}₽", callback_data="occ:buy"))
+    left = max(0, FREE_RETEXTS - state.get("retexts", 0))
+    label = f"✏️ Изменить текст (ещё {left})" if left else "✏️ Изменить текст — по твоему пожеланию"
+    if left == 0 and state.get("wish_used"):
+        label = None
+    if label:
+        kb.add(types.InlineKeyboardButton(label, callback_data="occ:retext"))
     kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data="letter:cancel"))
-    bot.send_message(
-        chat_id,
-        f"{esc(preview)}\n\n🔒 Дальше — письмо целиком, чистая открытка без надписи «превью» "
-        "и ссылка-конверт для получателя.",
-        parse_mode="HTML", reply_markup=kb)
+    return kb
+
+
+def occ_preview_text(state):
+    return (occ_masked_preview(state["letter"])
+            + "\n\n🔒 Вторая половина письма, чистая открытка без надписи «превью» "
+              "и ссылка-конверт для получателя — после оплаты.")
+
+
+def occ_photo_markup():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🖼 Другая картинка", callback_data="occ:pc:next"))
+    return kb
+
+
+def occ_preview_image(state):
+    return postcards.render(state["product"], state["card_title"], state["card_line"], state["sign"],
+                            preview=True, card_ref=state.get("card_ref"))
+
+
+def occ_send_preview(chat_id, state):
+    state["chat_id"] = chat_id
+    try:
+        msg = bot.send_photo(chat_id, occ_preview_image(state),
+                             caption="Твоя открытка (превью) 🖼 Не нравится картинка — выбери другую, это бесплатно.",
+                             reply_markup=occ_photo_markup())
+        state["photo_msg"] = msg.message_id
+    except Exception as exc:
+        log.error("postcard preview failed: %s", exc)
+    msg = bot.send_message(chat_id, occ_preview_text(state), parse_mode="HTML",
+                           reply_markup=occ_preview_markup(state))
+    state["text_msg"] = msg.message_id
+    cb_event(chat_id, "preview", state["product"], state.get("card_ref"))
+
+
+def occ_refresh_photo(chat_id, state):
+    try:
+        bot.edit_message_media(
+            types.InputMediaPhoto(occ_preview_image(state),
+                                  caption="Твоя открытка (превью) 🖼 Не нравится картинка — выбери другую, это бесплатно."),
+            chat_id, state["photo_msg"], reply_markup=occ_photo_markup())
+    except Exception as exc:
+        log.error("preview photo refresh: %s", exc)
+
+
+def occ_refresh_text(chat_id, state):
+    try:
+        bot.edit_message_text(occ_preview_text(state), chat_id, state["text_msg"], parse_mode="HTML",
+                              reply_markup=occ_preview_markup(state))
+    except Exception as exc:
+        log.error("preview text refresh: %s", exc)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:pc:next")
+def occ_pc_next(call):
+    chat_id = call.message.chat.id
+    state = STATES.get(chat_id) or {}
+    if state.get("step") not in ("occ_paywall", "occ_wish"):
+        bot.answer_callback_query(call.id, "Заказ устарел — начни заново", show_alert=True)
+        return
+    ref = cardbase_pick(chat_id, state["product"], state.get("card_seen", []))
+    if not ref:
+        bot.answer_callback_query(call.id, "Других картинок пока нет")
+        return
+    state["card_ref"] = ref
+    state.setdefault("card_seen", []).append(ref)
+    state["photo_msg"] = call.message.message_id
+    bot.answer_callback_query(call.id)
+    cb_event(chat_id, "pc_next", state["product"], ref)
+    occ_refresh_photo(chat_id, state)
+
+
+def occ_regenerate(chat_id, state, wish=""):
+    """Новый вариант письма на тех же ответах; открытка пересобирается с новым заголовком."""
+    p = OCC.PRODUCTS[state["product"]]
+    bot.send_chat_action(chat_id, "typing")
+    try:
+        res = AI.generate_occasion(p["brief"], state["product"], state["qa"], state["tone"], state["sign"],
+                                   state["default_title"], previous=state["letter"], wish=wish)
+    except Exception as exc:
+        log.error("occ regenerate: %s", exc)
+        res = {"letter": "[ai] ошибка"}
+    if res["letter"].startswith("[ai]"):
+        bot.send_message(chat_id, "Не получилось написать новый вариант 😔 Попробуй ещё раз чуть позже.")
+        return False
+    state.update(letter=res["letter"], card_title=res["card_title"], card_line=res["card_line"])
+    occ_refresh_text(chat_id, state)
+    occ_refresh_photo(chat_id, state)
+    return True
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:retext")
+def occ_retext(call):
+    chat_id = call.message.chat.id
+    state = STATES.get(chat_id) or {}
+    if state.get("step") != "occ_paywall":
+        bot.answer_callback_query(call.id, "Заказ устарел — начни заново", show_alert=True)
+        return
+    if not (AI and AI.available()):
+        bot.answer_callback_query(call.id, "Помощник сейчас недоступен", show_alert=True)
+        return
+    if state.get("retexts", 0) < FREE_RETEXTS:
+        bot.answer_callback_query(call.id, "Пишу другой вариант…")
+        if occ_regenerate(chat_id, state):
+            state["retexts"] = state.get("retexts", 0) + 1
+            cb_event(chat_id, "retext", state["product"], state.get("card_ref"))
+            occ_refresh_text(chat_id, state)  # обновить счётчик на кнопке
+        return
+    if state.get("wish_used"):
+        bot.answer_callback_query(call.id, "Правки закончились — письмо можно забрать или начать заново",
+                                  show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    state["step"] = "occ_wish"
+    bot.send_message(chat_id, "Два бесплатных варианта позади 🤍 Напиши одним сообщением, что изменить: "
+                              "тон, детали, длину, что убрать или добавить. Я учту это и перепишу письмо — "
+                              "это последняя правка.\n\n/cancel — вернуться к письму.")
+
+
+@bot.message_handler(
+    func=lambda m: STATES.get(m.chat.id, {}).get("step") == "occ_wish" and m.content_type == "text"
+)
+def occ_wish_receive(message):
+    chat_id = message.chat.id
+    state = STATES[chat_id]
+    text = (message.text or "").strip()
+    if text.lower() in ("/cancel", "отмена"):
+        state["step"] = "occ_paywall"
+        bot.send_message(chat_id, "Хорошо, оставляю как есть. Письмо ждёт выше 👆")
+        return
+    if len(text) < 3 or len(text) > 500:
+        bot.send_message(chat_id, "Напиши пожелание коротко, до 500 знаков.")
+        return
+    state["step"] = "occ_paywall"
+    state["wish_used"] = True
+    cb_event(chat_id, "retext_wish", state["product"], state.get("card_ref"))
+    if occ_regenerate(chat_id, state, wish=text):
+        bot.send_message(chat_id, "Переписала с твоим пожеланием 👆 Если подходит — можно забирать.")
+    else:
+        state["wish_used"] = False
 
 
 def occ_make_order(chat_id, user, state, status="pending", price=None):
@@ -1730,6 +1907,7 @@ def occ_make_order(chat_id, user, state, status="pending", price=None):
         "letter_text": state["letter"],
         "card_title": state["card_title"],
         "card_line": state["card_line"],
+        "card_ref": state.get("card_ref"),
         "sign": state["sign"],
         "price_rub": p["price"] if price is None else price,
         "status": status,
@@ -1754,6 +1932,7 @@ def occ_buy(call):
         safe_edit(call, f"Заказ устарел. Начни заново: «{OCC_BUTTON}».")
         return
     order = occ_make_order(chat_id, call.from_user, state)
+    cb_event(chat_id, "buy", state["product"], state.get("card_ref"))
     if send_order_invoice(chat_id, order):
         notify_admin_new_order(order)
 
@@ -1770,6 +1949,7 @@ def occ_credit(call):
     profile["credits"] -= 1
     write_json(client_path(chat_id), profile)
     order = occ_make_order(chat_id, call.from_user, state, status="done", price=0)
+    cb_event(chat_id, "buy", state["product"], state.get("card_ref"))
     order["paid_at"] = order["delivered_at"] = now_msk().isoformat()
     order["paid_by"] = "credit"
     save_order(order)
@@ -1808,6 +1988,105 @@ def occ_pack(call):
     send_order_invoice(chat_id, order)
 
 
+# ── Новые фоны открыток: вечерняя подборка владельцу с кнопками ✅/❌ ──
+CARD_REVIEW_HOUR = 19      # МСК
+CARD_REVIEW_BATCH = 30     # не заваливаем чат: остальные придут на следующий вечер
+CARD_REVIEW_MARK = os.path.join(DATA_DIR, "cards_review_last.txt")
+
+
+def send_card_review(limit=CARD_REVIEW_BATCH):
+    """Присылает владельцу ещё не показанные фоны со статусом review. Возвращает, сколько отправлено."""
+    if not ADMIN_ID:
+        return 0
+    cardbase.sync_catalog()
+    sent = 0
+    for card in cardbase.review_queue()[:limit]:
+        occ, _, stem = card["id"].partition("-")
+        path = os.path.join(postcards.BGS, occ, f"{stem}.jpg")
+        if not os.path.exists(path):
+            continue
+        title = OCC.PRODUCTS.get(occ, {}).get("title", occ)
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ В базу", callback_data=f"cbr:ok:{card['id']}"),
+               types.InlineKeyboardButton("❌ Убрать", callback_data=f"cbr:no:{card['id']}"))
+        try:
+            with open(path, "rb") as f:
+                bot.send_photo(ADMIN_ID, f, reply_markup=kb,
+                               caption=f"🖼 Новый фон · {title}\n{card['id']} · стиль {card['style']} · сезон {card['season']}")
+            cardbase.mark_review_sent(card["id"])
+            sent += 1
+        except Exception as exc:
+            log.error("card review send %s: %s", card["id"], exc)
+    if sent:
+        bot.send_message(ADMIN_ID, f"🖼 Подборка фонов: {sent} шт. Одобренные сразу попадут в «Другая картинка».")
+    return sent
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cbr:"))
+def card_review_cb(call):
+    if call.message.chat.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Недоступно")
+        return
+    _, verdict, card_id = call.data.split(":", 2)
+    status = "active" if verdict == "ok" else "retired"
+    if not cardbase.set_status(card_id, status):
+        bot.answer_callback_query(call.id, "Фон не найден")
+        return
+    bot.answer_callback_query(call.id, "В базе ✅" if status == "active" else "Убрано ❌")
+    try:
+        bot.edit_message_caption(f"{'✅ В базе' if status == 'active' else '❌ Убрано'} · {card_id}",
+                                 call.message.chat.id, call.message.message_id)
+    except Exception as exc:
+        log.debug("review caption: %s", exc)
+
+
+@bot.message_handler(commands=["review"])
+def cmd_card_review(message):
+    if not admin_only(message):
+        return
+    if not send_card_review():
+        bot.send_message(message.chat.id, "Новых фонов на проверку нет.")
+
+
+@bot.message_handler(commands=["cardstats"])
+def cmd_card_stats(message):
+    if not admin_only(message):
+        return
+    r = cardbase.report(30)
+    top = "\n".join(f"  {cid}: показов {d['preview']}, оплат {d['paid']}" for cid, d in r["top"]) or "  —"
+    st = r["statuses"]
+    bot.send_message(
+        message.chat.id,
+        "🖼 <b>Открытки за 30 дней</b>\n\n"
+        f"Превью показано: {r['previews']}\n"
+        f"Нажали «Оплатить»: {r['buy']}\n"
+        f"Оплачено: {r['paid']} (конверсия {r['conversion']}%)\n"
+        f"«Другая картинка»: {r['pc_next']}\n"
+        f"Перегенераций текста: {r['retext']} + по пожеланию {r['retext_wish']}\n\n"
+        f"Фоны в базе: активных {st.get('active', 0)}, на проверке {st.get('review', 0)}, "
+        f"убрано {st.get('retired', 0)}\n\nЛучшие фоны:\n{top}",
+        parse_mode="HTML")
+
+
+def card_review_loop():
+    while True:
+        try:
+            now = now_msk()
+            last = ""
+            try:
+                with open(CARD_REVIEW_MARK, encoding="utf-8") as f:
+                    last = f.read().strip()
+            except OSError:
+                pass
+            if now.hour >= CARD_REVIEW_HOUR and last != now.date().isoformat():
+                send_card_review()
+                with open(CARD_REVIEW_MARK, "w", encoding="utf-8") as f:
+                    f.write(now.date().isoformat())
+        except Exception as exc:
+            log.error("card review loop: %s", exc)
+        time.sleep(600)
+
+
 def occ_gift_code(order):
     code = order.get("gift_code")
     if not code:
@@ -1830,10 +2109,17 @@ def occ_web_envelope(order):
 
 def occ_postcard(order, preview=False):
     return postcards.render(order["product"], order.get("card_title", ""),
-                            order.get("card_line", ""), order.get("sign", ""), preview=preview)
+                            order.get("card_line", ""), order.get("sign", ""), preview=preview,
+                            card_ref=order.get("card_ref"))
 
 
 def occ_deliver(chat_id, order):
+    if order.get("card_ref") and not order.get("is_test"):
+        try:  # эта картинка больше не предлагается этому человеку
+            cardbase.mark_taken(order["chat_id"], order["card_ref"])
+        except Exception as exc:
+            log.error("cardbase mark_taken: %s", exc)
+    cb_event(order["chat_id"], "paid", order.get("product"), order.get("card_ref"))
     try:
         msg = bot.send_photo(chat_id, occ_postcard(order), caption="🖼 Твоя открытка")
         # file_id нужен inline-отправке: открытка уходит в чат получателя от имени автора
@@ -3358,6 +3644,7 @@ def bot_stats(days=62):
         "clients_total": clients_total, "paid_total": paid_total, "revenue_total": revenue_total,
         "pending": pending, "gifts_sent": gifts_sent, "gifts_opened": gifts_opened,
         "sources": sources, "products": products, "daily": dict(sorted(daily.items())),
+        "cards": cardbase.report(days),
     }
 
 
@@ -3503,6 +3790,7 @@ if __name__ == "__main__":
     start_autobackup()
     start_yk_poller()
     threading.Thread(target=reminder_loop, name="reminders", daemon=True).start()
+    threading.Thread(target=card_review_loop, name="card_review", daemon=True).start()
     try:
         import vk_bridge
         import vk_shop
