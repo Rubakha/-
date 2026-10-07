@@ -296,6 +296,68 @@ def is_test_user(chat_id):
     return bool(chat_id) and chat_id in TEST_USERS
 
 
+TEST_USERS_FILE = os.path.join(DATA_DIR, "test_users.json")  # список, который ведёт админ командами /test_add
+
+
+def load_test_users():
+    """Тестовые аккаунты: переменная TEST_USERS + файл в DATA_DIR (его меняет только админ в боте)."""
+    try:
+        TEST_USERS.update(int(x) for x in read_json(TEST_USERS_FILE, []) if str(x).lstrip("-").isdigit())
+    except (TypeError, ValueError):
+        pass
+
+
+def save_test_users():
+    write_json(TEST_USERS_FILE, sorted(TEST_USERS))
+
+
+def find_client_by_username(username):
+    username = (username or "").lstrip("@").lower()
+    for fname in os.listdir(CLIENTS_DIR) if os.path.isdir(CLIENTS_DIR) else []:
+        if fname.endswith(".json"):
+            c = read_json(os.path.join(CLIENTS_DIR, fname), None) or {}
+            if username and (c.get("username") or "").lower() == username:
+                return c
+    return None
+
+
+@bot.message_handler(commands=["test_add", "test_off", "test_list"])
+def cmd_test_users(message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    cmd = parts[0].split("@")[0]
+    if cmd == "/test_list":
+        rows = []
+        for cid in sorted(TEST_USERS):
+            c = get_client(cid) or {}
+            rows.append(f"• {cid} {('@' + c['username']) if c.get('username') else ''} {c.get('name', '')}".strip())
+        bot.send_message(message.chat.id, "🧪 Тестовые аккаунты:\n" + ("\n".join(rows) or "пока нет"))
+        return
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "Формат: /test_add @username — аккаунт должен хотя бы раз нажать /start в боте.")
+        return
+    client = find_client_by_username(parts[1])
+    if not client:
+        bot.send_message(message.chat.id, "Такого ника нет среди клиентов. Пусть этот аккаунт сначала нажмёт /start в боте.")
+        return
+    if client["chat_id"] == ADMIN_ID:
+        bot.send_message(message.chat.id, "Это аккаунт админа — для него тест не включаю.")
+        return
+    if cmd == "/test_add":
+        TEST_USERS.add(client["chat_id"])
+        save_test_users()
+        bot.send_message(message.chat.id, f"🧪 Тестовый режим включён для @{client['username']}: оплата 0 ₽ без ЮKassa, "
+                                          "вне статистики, рассылок и начислений партнёрам.")
+    else:
+        TEST_USERS.discard(client["chat_id"])
+        save_test_users()
+        bot.send_message(message.chat.id, f"Тестовый режим выключен для @{client['username']}.")
+
+
+load_test_users()
+
+
 def all_orders(include_test=False):
     """Тестовые заказы (is_test) по умолчанию скрыты — вся статистика, финансы и напоминания их не видят."""
     ensure_dirs()

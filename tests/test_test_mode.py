@@ -35,7 +35,7 @@ B.yk_request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("ЮKassa н�
 
 
 def user(chat):
-    return pytypes.SimpleNamespace(id=chat, first_name="Тест", last_name="", username="t")
+    return pytypes.SimpleNamespace(id=chat, first_name="Тест", last_name="", username="u%d" % chat)
 
 
 def msg(text, chat):
@@ -96,4 +96,18 @@ assert t["order_id"] in [o["order_id"] for o in B.all_orders(include_test=True)]
 assert t["order_id"] in [o["order_id"] for o in B.client_orders(777)]
 files = B.client_files()
 assert "777.json" not in files and "500.json" in files
+
+# админ включает тест по нику командой — без переменной окружения и рестарта
+B.cmd_start(msg("/start", 888))
+assert not B.is_test_user(888)
+B.cmd_test_users(msg("/test_add u888", 1))
+assert B.is_test_user(888) and 888 in B.read_json(B.TEST_USERS_FILE, [])
+B.cmd_test_users(msg("/test_add u888", 500))  # не админ — игнор
+B.TEST_USERS.discard(555)
+B.cmd_test_users(msg("/test_add nobody", 1))
+assert "нет среди клиентов" in [s for s in SENT if s[0] == "send_message"][-1][1][1]
+B.cmd_test_users(msg("/test_off u888", 1))
+assert not B.is_test_user(888) and 888 not in B.read_json(B.TEST_USERS_FILE, [])
+B.cmd_test_users(msg("/test_add u1", 1))  # профиль админа не делаем тестовым
+assert not B.is_test_user(1)
 print("OK: тестовый режим")
