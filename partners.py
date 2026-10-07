@@ -26,6 +26,7 @@ FRIEND_DISCOUNT = 10           # «Подари подруге»: −10% дру�
 FRIEND_BONUS_RUB = 50          # клиенту — за каждого оплатившего друга, на баланс
 LOCK_DAYS = 30                 # первая оплата в течение 30 дней закрепляет партнёра навсегда
 AVG_CHECK_FALLBACK = 249       # для калькулятора, пока мало реальных заказов
+MIN_PAYOUT_RUB = 500           # выплаты — по понедельникам по СБП, от этой суммы
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 B = None
@@ -453,7 +454,9 @@ def partner_line(p, s):
     flag = "" if p["status"] == "active" else " ⏸"
     return (f"<b>{B.esc(p['name'])}</b>{flag} · {p['percent']}% / скидка {p['discount']}% · <code>{p['code']}</code>\n"
             f"   переходы {s['clicks']} · новые {s['new_users']} · заказы {s['orders']} · оборот {money(s['turnover'])}\n"
-            f"   начислено {money(s['earned'])} · выплачено {money(s['paid'])} · <b>к выплате {money(s['due'])}</b>")
+            f"   начислено {money(s['earned'])} · выплачено {money(s['paid'])} · <b>к выплате {money(s['due'])}</b>"
+            + (" ✅ можно платить" if s["due"] >= MIN_PAYOUT_RUB else
+               (f" (ещё копится до {MIN_PAYOUT_RUB} ₽)" if s["due"] > 0 else "")))
 
 
 def kb_admin_list():
@@ -482,7 +485,8 @@ def invite_text(p):
             f"• Вашей аудитории — скидка {p['discount']}% на первое письмо (ссылка или промокод {p['code']}).\n"
             f"• Человек закрепляется за вами навсегда, если оплатит в течение {LOCK_DAYS} дней после перехода.\n"
             "• В личном кабинете в боте — переходы, заказы, начисления и выплаты в реальном времени.\n"
-            "• Выплаты — по СБП/на карту, всё прозрачно: каждое начисление видно в кабинете.\n\n"
+            f"• Выплата по понедельникам по СБП, от {MIN_PAYOUT_RUB} ₽; каждое начисление видно в кабинете.\n"
+            f"• Процент считается от суммы, которую клиент реально заплатил (после скидки).\n\n"
             f"Ваша ссылка: {link(p['code'])}\nПромокод: {p['code']}\n\n"
             f"Чтобы открыть кабинет, нажмите: {invite_link(p['invite_token'])}\n\n"
             "Важно: реклама в вашем канале маркируется (erid) — это ответственность публикующего, "
@@ -637,6 +641,11 @@ def admin_steps(message):
         due = partner_stats(p)["due"]
         if v is None:
             B.bot.send_message(chat_id, "Нужна сумма в рублях.")
+            return
+        if due < MIN_PAYOUT_RUB:
+            B.STATES.pop(chat_id, None)
+            B.bot.send_message(chat_id, f"К выплате {money(due)} — меньше минимума {MIN_PAYOUT_RUB} ₽. "
+                                        "Выплата по понедельникам от этой суммы, пока копится.")
             return
         if v > due:
             B.bot.send_message(chat_id, f"Это больше, чем к выплате ({money(due)}). Введи сумму не больше.")
@@ -834,7 +843,18 @@ def cabinet_markup():
            B.types.InlineKeyboardButton("🧮 Калькулятор", callback_data="pt:calc"))
     kb.add(B.types.InlineKeyboardButton("📝 Тексты постов", callback_data="pt:posts"),
            B.types.InlineKeyboardButton("💸 Выплаты", callback_data="pt:pay"))
+    kb.add(B.types.InlineKeyboardButton("📦 Набор партнёра (посты и сторис)", callback_data="pt:kit"))
     return kb
+
+
+def kit_text(p):
+    """Набор партнёра из assets/partner_kit.md: ссылка, код и скидка подставлены; erid и рекламодателя
+    партнёр вписывает сам."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "partner_kit.md")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    return (text.replace("{КОД}", p["code"]).replace("{ссылка}", link(p["code"]))
+            .replace("−15%", f"−{p['discount']}%"))
 
 
 def cabinet_text(p):
@@ -846,6 +866,8 @@ def cabinet_text(p):
             f"Переходы: {s['clicks']} (уникальных {s['unique']})\nНовых пользователей: {s['new_users']}\n"
             f"Заказов: {s['orders']} · покупателей: {s['buyers']}\nОборот: {money(s['turnover'])}\n\n"
             f"Начислено: {money(s['earned'])}\nВыплачено: {money(s['paid'])}\n<b>К выплате: {money(s['due'])}</b>\n\n"
+            f"Выплата по понедельникам по СБП, от {MIN_PAYOUT_RUB} ₽. Процент считается от суммы, которую "
+            "клиент реально заплатил (после скидки).\n"
             f"Закрепление: если человек оплатит в течение {LOCK_DAYS} дней после перехода — он за тобой навсегда.")
 
 
@@ -904,10 +926,17 @@ def cabinet_cb(call):
                                     "добавь свой erid, как требует закон о рекламе.")
         for t in posts_text(p):
             B.bot.send_message(chat_id, t, disable_web_page_preview=True)
+    elif action == "kit":
+        f = io.BytesIO(kit_text(p).encode("utf-8"))
+        f.name = "partner_kit.txt"
+        B.bot.send_document(chat_id, f, caption="Набор партнёра: ссылка и код уже подставлены. Реклама маркируется — "
+                                                "рекламодателя и erid впиши перед публикацией.")
     elif action == "pay":
         hist = p.get("payouts", [])
         s = partner_stats(p)
-        text = f"💸 <b>Выплаты</b>\nК выплате сейчас: <b>{money(s['due'])}</b>\n\n" + (
+        text = (f"💸 <b>Выплаты</b>\nВыплата по понедельникам по СБП, от {MIN_PAYOUT_RUB} ₽.\n"
+                f"К выплате сейчас: <b>{money(s['due'])}</b>"
+                + ("" if s["due"] >= MIN_PAYOUT_RUB else f" (копится до {MIN_PAYOUT_RUB} ₽)") + "\n\n") + (
             "\n".join(f"• {x['date']} — {money(x['amount'])} {B.esc(x.get('comment') or '')}" for x in hist[-15:])
             if hist else "Выплат пока не было.")
         B.bot.send_message(chat_id, text, parse_mode="HTML")

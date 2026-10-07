@@ -273,16 +273,23 @@ P.admin_cb(call(f"pa:disc:{code}", 1))
 admin_say("10")
 assert P.get_partner(code)["discount"] == 10
 P.admin_cb(call(f"pa:pay:{code}", 1))
+admin_say("10")
+assert "меньше минимума 500" in texts(1)[-1], "до 500 ₽ выплата не отмечается"
+B.save_order({"order_id": "ALI-BIG", "chat_id": 555, "name": "Т", "pain": "x", "product": "family",
+              "price_rub": 1840, "status": "done", "partner_code": code, "partner_percent": 30,
+              "partner_commission": 552, "created_at": B.now_msk().isoformat()})
+assert P.partner_stats(P.get_partner(code))["due"] == 600
+P.admin_cb(call(f"pa:pay:{code}", 1))
 admin_say("1000")
 assert "больше, чем к выплате" in texts(1)[-1]
-admin_say("30")
+admin_say("100")
 admin_say("СБП за октябрь")
 pr = P.get_partner(code)
-assert pr["payouts"][0]["amount"] == 30 and P.partner_stats(pr)["due"] == 18
+assert pr["payouts"][0]["amount"] == 100 and P.partner_stats(pr)["due"] == 500
 P.admin_cb(call("pa:csv", 1))
 doc = [s for s in SENT if s[0] == "send_document"][-1][1][1]
 csv_text = doc.getvalue().decode("utf-8-sig")
-assert "Блог Маши" in csv_text and ";48;30;18;" in csv_text, csv_text
+assert "Блог Маши" in csv_text and ";600;100;500;" in csv_text, csv_text
 P.admin_cb(call("pa:list", 500))  # не админ — игнор
 assert not any(s[0] == "send_document" and s[1][0] == 500 for s in SENT)
 
@@ -291,13 +298,17 @@ SENT.clear()
 B.cmd_start(msg(f"/start pinvite_{pr['invite_token']}", 900))
 assert P.get_partner(code)["tg_chat_id"] == 900 and "Кабинет партнёра" in texts(900)[0]
 cab = texts(900)[-1]
-assert "К выплате: 18 ₽" in cab and "Выплачено: 30 ₽" in cab and f"start=p_{code}" in cab
+assert "К выплате: 500 ₽" in cab and "Выплачено: 100 ₽" in cab and "по понедельникам" in cab and "от 500" in cab and f"start=p_{code}" in cab
 P.cabinet_cb(call("pt:calc", 900))
 assert "заказов в месяц" in texts(900)[-1]
 P.cabinet_cb(call("pt:posts", 900))
 assert sum(1 for t in texts(900) if f"p_{code}" in t) >= 3 and "erid" in " ".join(texts(900))
+P.cabinet_cb(call("pt:kit", 900))
+kit = [s for s in SENT if s[0] == "send_document"][-1][1][1].getvalue().decode("utf-8")
+assert f"start=p_{code}" in kit and code in kit and "{КОД}" not in kit and "{ссылка}" not in kit
+assert "erid" in kit and "{erid}" in kit and "−10%" in kit and "−15%" not in kit
 P.cabinet_cb(call("pt:pay", 900))
-assert "30 ₽" in texts(900)[-1]
+assert "100 ₽" in texts(900)[-1]
 SENT.clear()
 B.cmd_start(msg(f"/start pinvite_{pr['invite_token']}", 801))  # чужой аккаунт не перехватывает кабинет
 assert P.get_partner(code)["tg_chat_id"] == 900 and "уже использовано" in texts(801)[0]
@@ -316,7 +327,7 @@ assert P.get_promo("BAD") is None
 P.cmd_promo_off(msg("/promo_off WELCOME", 1))
 assert not P.check_promo(1234, "WELCOME")[0]
 rep = P.report()
-assert rep["partners"][0]["earned"] == 48 and any(x["code"] == "SALE20" and x["uses"] == 1 for x in rep["promos"])
+assert rep["partners"][0]["earned"] == 600 and any(x["code"] == "SALE20" and x["uses"] == 1 for x in rep["promos"])
 
 # ── кнопка «Подари подруге» в финальном сообщении ──
 SENT.clear()
@@ -340,4 +351,19 @@ free = [o for o in B.all_orders() if o["chat_id"] == 700 and o.get("balance_used
 assert free["status"] == "done" and free["price_rub"] == 0 and free["charge_id"] == "free"
 assert B.get_client(700)["bonus_rub"] == 301, "списано ровно по заказу"
 assert len([s for s in SENT if s[0] == "send_invoice"]) == n_inv, "окно оплаты не открывалось"
+
+# ── начисление — от реально оплаченной суммы: после скидки и без бонусного баланса ──
+prof = B.get_client(500)
+prof["bonus_rub"] = 100
+B.write_json(B.client_path(500), prof)
+ob = {"order_id": "ALI-BAL", "chat_id": 500, "name": "Т", "pain": "x", "product": "family", "price_rub": 199,
+      "status": "pending", "created_at": B.now_msk().isoformat()}
+P.apply_to_order(ob, 500)
+assert ob["price_rub"] == 99 and ob["balance_used_rub"] == 100
+ob["status"] = "done"
+B.save_order(ob)
+P.on_paid(B.get_order("ALI-BAL"))
+pct = P.get_partner(code)["percent"]
+assert B.get_order("ALI-BAL")["partner_commission"] == round(99 * pct / 100)
+assert B.get_client(500)["bonus_rub"] == 0
 print("OK: partners")
