@@ -11,6 +11,7 @@ card_ref — ссылка на картинку из базы (cardbase): "<по
 import io
 import os
 import random
+import re
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
@@ -164,7 +165,13 @@ def _paper_texture():
     return paper
 
 
+def _plain(text):
+    """Шрифты открытки не умеют эмодзи — в тексте на картинке их быть не должно."""
+    return re.sub(r"[𐀀-􏿿☀-➿️‍]", "", text or "").strip()
+
+
 def render(product_key, title, line, sign, preview=False, card_ref=None):
+    title, line, sign = _plain(title), _plain(line), _plain(sign)
     card = _paper_texture()
     photo = _background(product_key, card_ref)
     # фото плавно переходит в бумагу
