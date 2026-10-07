@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -24,6 +25,7 @@ from telebot import TeleBot, types
 from telebot.types import LabeledPrice, Update
 
 import cardbase
+import group_letters
 import occasions as OCC
 import postcards
 
@@ -461,6 +463,7 @@ def cmd_start(message):
         # первая точка входа для аналитики: pdf / occ / g_<код> / ref_<id> / direct
         src = parts[1] if len(parts) == 2 else "direct"
         profile["source"] = ("gift" if src.startswith("g_") else "ref" if src.startswith("ref_")
+                             else "group" if src.startswith("grp_")
                              else "web" if src.startswith("w_") else "vk" if src.startswith("v_") else src[:32])
         write_json(client_path(chat_id), profile)
 
@@ -474,6 +477,9 @@ def cmd_start(message):
 
     if len(parts) == 2 and parts[1].startswith("g_"):
         occ_gift_start(chat_id, parts[1][2:])
+        return
+    if len(parts) == 2 and parts[1].startswith("grp_"):  # участник общего письма: сразу к вопросам
+        group_letters.join(chat_id, message.from_user, parts[1][4:])
         return
 
     greet = "Привет!" if is_new else f"С возвращением, {esc(profile['name'].split()[0])}!"
@@ -1066,7 +1072,8 @@ def send_reminders(now=None):
             st["reminded"] = True
             p = OCC.PRODUCTS.get(st.get("product"), {})
             kb = types.InlineKeyboardMarkup(row_width=1)
-            kb.add(types.InlineKeyboardButton(f"🔓 Забрать письмо — {p.get('price', '')}₽", callback_data="occ:buy"))
+            kb.add(types.InlineKeyboardButton(f"🔓 Забрать письмо — {st.get('price') or p.get('price', '')}₽",
+                                              callback_data="occ:buy"))
             kb.add(types.InlineKeyboardButton("❌ Не нужно", callback_data="letter:cancel"))
             try:
                 bot.send_message(chat_id, f"💌 Письмо для {esc(st.get('name') or 'близкого человека')} ещё ждёт тебя — "
@@ -1131,6 +1138,8 @@ def cabinet_cancel(call):
         return
     order["status"] = "cancelled"
     save_order(order)
+    if order.get("group_id"):
+        group_letters.reopen(order["group_id"], order["order_id"])
     bot.answer_callback_query(call.id, "Заказ отменён")
     ask_diagnostic_start(chat_id)
 
@@ -1518,6 +1527,8 @@ def occ_catalog_markup():
     kb.add(types.InlineKeyboardButton(
         f"{OCC.PACK['icon']} {OCC.PACK['title']} · {OCC.PACK['price']}₽", callback_data="occ:pack"))
     kb.add(types.InlineKeyboardButton(
+        f"👥 Письмо от всех нас · {group_letters.GROUP_PRICE}₽", callback_data="grp:new"))
+    kb.add(types.InlineKeyboardButton(
         f"💭 Глубокое письмо о том, что держит · {LETTER_PRICE_RUB}₽", callback_data="gift:menu"))
     return kb
 
@@ -1735,12 +1746,13 @@ def occ_masked_preview(letter):
 
 def occ_preview_markup(state):
     p = OCC.PRODUCTS[state["product"]]
-    credits = (get_client(state.get("chat_id", 0)) or {}).get("credits", 0)
+    credits = 0 if state.get("group") else (get_client(state.get("chat_id", 0)) or {}).get("credits", 0)
     kb = types.InlineKeyboardMarkup(row_width=1)
     if credits:
         kb.add(types.InlineKeyboardButton(f"🎁 Забрать по набору (осталось {credits})",
                                           callback_data="occ:credit"))
-    kb.add(types.InlineKeyboardButton(f"💳 Оплатить — {p['price']}₽", callback_data="occ:buy"))
+    kb.add(types.InlineKeyboardButton(f"💳 Оплатить — {state.get('price') or p['price']}₽",
+                                      callback_data="occ:buy"))
     left = max(0, FREE_RETEXTS - state.get("retexts", 0))
     label = f"✏️ Изменить текст (ещё {left})" if left else "✏️ Изменить текст — по твоему пожеланию"
     if left == 0 and state.get("wish_used"):
@@ -1825,8 +1837,11 @@ def occ_regenerate(chat_id, state, wish=""):
     p = OCC.PRODUCTS[state["product"]]
     bot.send_chat_action(chat_id, "typing")
     try:
-        res = AI.generate_occasion(p["brief"], state["product"], state["qa"], state["tone"], state["sign"],
-                                   state["default_title"], previous=state["letter"], wish=wish)
+        if state.get("group"):  # групповое письмо: тот же набор голосов участников
+            res = group_letters.generate(state["group"], previous=state["letter"], wish=wish)
+        else:
+            res = AI.generate_occasion(p["brief"], state["product"], state["qa"], state["tone"], state["sign"],
+                                       state["default_title"], previous=state["letter"], wish=wish)
     except Exception as exc:
         log.error("occ regenerate: %s", exc)
         res = {"letter": "[ai] ошибка"}
@@ -1909,7 +1924,7 @@ def occ_make_order(chat_id, user, state, status="pending", price=None):
         "card_line": state["card_line"],
         "card_ref": state.get("card_ref"),
         "sign": state["sign"],
-        "price_rub": p["price"] if price is None else price,
+        "price_rub": (state.get("price") or p["price"]) if price is None else price,
         "status": status,
         "is_gift": True,
         "gift_for": state.get("name"),
@@ -1919,6 +1934,9 @@ def occ_make_order(chat_id, user, state, status="pending", price=None):
         "email": None,
         "rating": None,
     }
+    if state.get("group"):
+        order["group_id"] = state["group"]
+        group_letters.mark_ordered(state["group"], order["order_id"])
     save_order(order)
     return order
 
@@ -1943,7 +1961,7 @@ def occ_credit(call):
     state = STATES.get(chat_id) or {}
     profile = get_client(chat_id) or {}
     bot.answer_callback_query(call.id)
-    if state.get("step") != "occ_paywall" or profile.get("credits", 0) < 1:
+    if state.get("step") != "occ_paywall" or profile.get("credits", 0) < 1 or state.get("group"):
         safe_edit(call, f"Не получилось — начни заново: «{OCC_BUTTON}».")
         return
     profile["credits"] -= 1
@@ -3463,6 +3481,9 @@ def start_autobackup():
     t.start()
 
 
+group_letters.register(sys.modules[__name__])  # до fallback: его обработчик ловит любой текст
+
+
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def fallback(message):
     chat_id = message.chat.id
@@ -3645,6 +3666,7 @@ def bot_stats(days=62):
         "pending": pending, "gifts_sent": gifts_sent, "gifts_opened": gifts_opened,
         "sources": sources, "products": products, "daily": dict(sorted(daily.items())),
         "cards": cardbase.report(days),
+        "groups": group_letters.report(),
     }
 
 
