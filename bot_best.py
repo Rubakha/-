@@ -222,6 +222,8 @@ def pain_meta(order_or_key):
         return {"icon": p["icon"], "title": p["title"]}
     if key == OCC.PACK["key"]:
         return {"icon": OCC.PACK["icon"], "title": OCC.PACK["title"]}
+    if key == OCC.DOC["key"]:
+        return {"icon": OCC.DOC["icon"], "title": OCC.DOC["title"]}
     return PAIN_META.get(key, {"icon": "•", "title": key or "—"})
 
 
@@ -582,6 +584,8 @@ def cmd_start(message):
 
     if len(parts) == 2 and parts[1] == "pdf":
         send_free_pdf(chat_id)
+    elif len(parts) == 2 and parts[1] == "papa_pdf":
+        occ_doc_order(chat_id, message.from_user)
     elif len(parts) == 2 and parts[1] == "occ":
         occ_open_catalog(chat_id)
     elif len(parts) == 2 and parts[1].startswith("occ_"):
@@ -906,6 +910,8 @@ def order_description(order):
     order_id = order["order_id"]
     if order.get("product") == OCC.PACK["key"]:
         return f"3 письма с открыткой, без срока. Заказ {order_id}."
+    if order.get("product") == OCC.DOC["key"]:
+        return f"PDF «Разговор с папой», сразу после оплаты. Заказ {order_id}."
     if order.get("product"):
         return f"Письмо и открытка — сразу после оплаты. Заказ {order_id}."
     return f"Целиком, сразу после оплаты. Заказ {order_id}."
@@ -1161,7 +1167,7 @@ def send_reminders(now=None):
     if not 10 <= now.hour < 21:
         return
     for o in all_orders():
-        if (o.get("status") != "pending" or o.get("reminded_at") or o.get("product") == OCC.PACK["key"]
+        if (o.get("status") != "pending" or o.get("reminded_at") or o.get("product") in (OCC.PACK["key"], OCC.DOC["key"])
                 or o.get("created_at", "") < REMINDERS_SINCE):
             continue
         try:
@@ -1326,6 +1332,20 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     if profile:
         profile["total_spent_rub"] = profile.get("total_spent_rub", 0) + order["price_rub"]
         write_json(client_path(chat_id), profile)
+
+    if order.get("product") == OCC.DOC["key"]:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("🎀 Письмо папе с открыткой", callback_data="occ:p:family"))
+        try:
+            with open(os.path.join(os.path.dirname(FREE_PDF_PATH), OCC.DOC["file"]), "rb") as f:
+                bot.send_document(chat_id, f, caption="✅ Оплата прошла. Твой «Разговор с папой» 🤍\nНачни с одной фразы. Если захочется письма — я помогу собрать его в открытку.",
+                                  reply_markup=kb)
+        except OSError as exc:
+            log.error("doc not sent %s: %s", order_id, exc)
+            bot.send_message(chat_id, "Оплата прошла, но файл не отправился. Напиши в «❓ Помощь», пришлю вручную. "
+                                      f"Номер: <code>{order_id}</code>", parse_mode="HTML")
+        notify_admin_paid(order)
+        return
 
     if order.get("product") == OCC.PACK["key"]:
         profile = get_client(chat_id) or {}
@@ -1636,6 +1656,8 @@ def occ_catalog_markup():
         kb.row(*buttons[i:i + 2])
     kb.add(types.InlineKeyboardButton(
         f"{OCC.PACK['icon']} {OCC.PACK['title']} · {OCC.PACK['price']}₽", callback_data="occ:pack"))
+    kb.add(types.InlineKeyboardButton(
+        f"{OCC.DOC['icon']} {OCC.DOC['title']} · {OCC.DOC['price']}₽", callback_data="occ:doc"))
     kb.add(types.InlineKeyboardButton(
         f"👥 Письмо от всех нас · {group_letters.GROUP_PRICE}₽", callback_data="grp:new"))
     kb.add(types.InlineKeyboardButton(
@@ -2129,6 +2151,39 @@ def occ_pack(call):
         fulfill_order(chat_id, order["order_id"], "free", None)
     else:
         send_order_invoice(chat_id, order)
+
+
+def occ_doc_order(chat_id, user):
+    profile = upsert_client(user)
+    order = {
+        "order_id": new_order_id(), "chat_id": chat_id, "name": profile["name"],
+        "username": profile.get("username", ""), "pain": OCC.DOC["key"],
+        "product": OCC.DOC["key"], "answers": [], "letter_text": "",
+        "price_rub": OCC.DOC["price"], "status": "pending", "is_gift": False,
+        "created_at": now_msk().isoformat(), "paid_at": None, "delivered_at": None,
+        "email": None, "rating": None,
+    }
+    partners.apply_to_order(order, chat_id)
+    save_order(order)
+    bot.send_message(
+        chat_id,
+        f"{OCC.DOC['icon']} <b>{OCC.DOC['title']}</b>\n\n"
+        "30 фраз для пяти ситуаций (давно не говорили, после ссоры, строгий отец, расстояние, его нет рядом), "
+        "три начала письма и правила разговора. 10 страниц, приходит сразу после оплаты.",
+        parse_mode="HTML")
+    send_order_invoice(chat_id, order)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "occ:doc")
+def occ_doc(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    if pending_count(chat_id) >= MAX_PENDING:
+        pending = pending_orders(chat_id)[0]
+        bot.send_message(chat_id, "⏳ Сначала оплати или отмени неоплаченный заказ.",
+                         reply_markup=pending_markup(pending["order_id"]))
+        return
+    occ_doc_order(chat_id, call.from_user)
 
 
 # ── Новые фоны открыток: вечерняя подборка владельцу с кнопками ✅/❌ ──

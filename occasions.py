@@ -140,6 +140,9 @@ PRODUCTS = {
 PACK = {"key": "pack3", "icon": "🎁", "title": "Набор: 3 письма с открыткой",
         "price": 449, "credits": 3}
 
+DOC = {"key": "papa_pdf", "icon": "📘", "title": "Разговор с папой (PDF)", "price": 149,
+       "file": "razgovor_s_papoy.pdf"}
+
 CATALOG_ORDER = ["birthday", "love", "friend", "family", "thanks", "sorry",
                  "support", "toast", "newyear", "santa"]
 
