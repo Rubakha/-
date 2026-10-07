@@ -24,6 +24,7 @@ from flask import Flask, request
 from telebot import TeleBot, types
 from telebot.types import LabeledPrice, Update
 
+import calendar_reminders
 import cardbase
 import group_letters
 import occasions as OCC
@@ -1335,6 +1336,7 @@ def cabinet_view(chat_id):
         )
     kb.add(types.InlineKeyboardButton("💌 Новое письмо", callback_data="cab:new"))
     kb.add(types.InlineKeyboardButton("🎀 Письмо с открыткой", callback_data="occ:catalog"))
+    kb.add(types.InlineKeyboardButton("🔔 Напоминания о датах", callback_data="cal:menu"))
     return "\n".join(lines), kb
 
 
@@ -1934,6 +1936,8 @@ def occ_make_order(chat_id, user, state, status="pending", price=None):
         "email": None,
         "rating": None,
     }
+    if calendar_reminders.is_from_reminder(chat_id):
+        order["from_reminder"] = True  # человек пришёл с напоминания календаря (метрика)
     if state.get("group"):
         order["group_id"] = state["group"]
         group_letters.mark_ordered(state["group"], order["order_id"])
@@ -2174,6 +2178,10 @@ def occ_deliver(chat_id, order):
         f"<code>{link}</code>\n"
         "Или просто перешли ему открытку и письмо выше.",
         parse_mode="HTML", reply_markup=kb)
+    try:
+        calendar_reminders.offer_after_order(chat_id, order)
+    except Exception as exc:
+        log.error("calendar offer: %s", exc)
 
 
 @bot.inline_handler(func=lambda q: (q.query or "").startswith("card_"))
@@ -3482,6 +3490,7 @@ def start_autobackup():
 
 
 group_letters.register(sys.modules[__name__])  # до fallback: его обработчик ловит любой текст
+calendar_reminders.register(sys.modules[__name__])
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -3667,6 +3676,7 @@ def bot_stats(days=62):
         "sources": sources, "products": products, "daily": dict(sorted(daily.items())),
         "cards": cardbase.report(days),
         "groups": group_letters.report(),
+        "calendar": calendar_reminders.report(days),
     }
 
 
@@ -3813,6 +3823,7 @@ if __name__ == "__main__":
     start_yk_poller()
     threading.Thread(target=reminder_loop, name="reminders", daemon=True).start()
     threading.Thread(target=card_review_loop, name="card_review", daemon=True).start()
+    threading.Thread(target=calendar_reminders.loop, name="calendar", daemon=True).start()
     try:
         import vk_bridge
         import vk_shop
