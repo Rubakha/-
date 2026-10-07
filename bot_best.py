@@ -28,6 +28,7 @@ import calendar_reminders
 import cardbase
 import group_letters
 import occasions as OCC
+import partners
 import postcards
 
 try:
@@ -368,6 +369,7 @@ def kb_admin():
     kb.add("📊 Заказы", "📈 Статистика")
     kb.add("📮 Рассылка", "📥 Экспорт")
     kb.add("💾 Бэкап", "🖥 Диск")
+    kb.add("🤝 Партнёры", "🎟 Промокоды")
     kb.add("🤖 Помощник")
     return kb
 
@@ -482,13 +484,27 @@ def cmd_start(message):
     if len(parts) == 2 and parts[1].startswith("grp_"):  # участник общего письма: сразу к вопросам
         group_letters.join(chat_id, message.from_user, parts[1][4:])
         return
+    if len(parts) == 2 and parts[1].startswith("pinvite_"):  # партнёр открывает свой кабинет
+        partners.bind_invite(chat_id, parts[1][8:])
+        return
 
     greet = "Привет!" if is_new else f"С возвращением, {esc(profile['name'].split()[0])}!"
     invited = ""
+    partner_hello = None
+    if len(parts) == 2 and parts[1].startswith("p_"):  # партнёрская ссылка: закрепляем по правилам
+        try:
+            partner = partners.touch(chat_id, parts[1][2:], is_new)
+        except Exception as exc:
+            partner = None
+            log.error("partner touch: %s", exc)
+        if partner and partners.quote(chat_id, 100)["source"] == f"partner:{partner['code']}":
+            partner_hello = f"\n🎁 Для тебя скидка {partner['discount']}% на первое письмо — применится сама.\n"
     if referred_by and is_new:
         inviter = get_client(referred_by)
         if inviter:
-            invited = f"\nТебя пригласил(а) {esc(inviter['name'])}. 💌\n"
+            invited = (f"\nТебя пригласил(а) {esc(inviter['name'])}. 💌 "
+                       f"На первое письмо у тебя скидка {partners.FRIEND_DISCOUNT}% — применится сама.\n")
+    invited = invited or partner_hello or ""
 
     stats = real_stats_line()
     text = (
@@ -500,6 +516,7 @@ def cmd_start(message):
         + "Выбери внизу, с чего начать 🤍"
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb_client())
+    partners.offer_cabinet(chat_id)
 
     if len(parts) == 2 and parts[1] == "pdf":
         send_free_pdf(chat_id)
@@ -632,18 +649,51 @@ def finish_diagnostics(chat_id, state):
     state["step"] = "paywall"
     save_anketa_update(state, letter_text=letter)
 
+    state["chat_id"] = chat_id
+    msg = bot.send_message(chat_id, diag_paywall_text(state), parse_mode="HTML",
+                           reply_markup=diag_paywall_markup(state))
+    state["paywall_msg"] = msg.message_id
+
+
+def price_base(state):
+    """Цена до скидок для письма в текущем состоянии диалога."""
+    if state.get("price"):
+        return state["price"]
+    if state.get("product") in OCC.PRODUCTS:
+        return OCC.PRODUCTS[state["product"]]["price"]
+    return LETTER_PRICE_RUB
+
+
+def diag_paywall_text(state):
+    letter = state["letter_text"]
     preview = letter if len(letter) <= 350 else letter[:350] + "…"
+    q = partners.quote(state["chat_id"], price_base(state), state.get("promo"))
+    lines = partners.price_lines(q)
+    return (f"{esc(preview)}\n\n🔒 Дальше — продолжение письма, целиком, у тебя в чате."
+            + (f"\n\n{lines}" if lines else ""))
+
+
+def diag_paywall_markup(state):
+    q = partners.quote(state["chat_id"], price_base(state), state.get("promo"))
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(
-        f"🔓 Получить письмо целиком — {LETTER_PRICE_RUB}₽", callback_data="letter:buy"
+        f"🔓 Получить письмо целиком — {partners.button_price(q)}", callback_data="letter:buy"
     ))
+    kb.add(types.InlineKeyboardButton("🎟 Есть промокод", callback_data="pr:enter"))
     kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data="letter:cancel"))
-    bot.send_message(
-        chat_id,
-        f"{esc(preview)}\n\n🔒 Дальше — продолжение письма, целиком, у тебя в чате.",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+    return kb
+
+
+def refresh_paywall(chat_id, state):
+    """Перерисовывает превью после ввода промокода (для обоих сценариев)."""
+    if state.get("product") in OCC.PRODUCTS:
+        occ_refresh_text(chat_id, state)
+        return
+    try:
+        bot.edit_message_text(diag_paywall_text(state), chat_id, state["paywall_msg"], parse_mode="HTML",
+                              reply_markup=diag_paywall_markup(state))
+    except Exception as exc:
+        log.error("diag paywall refresh: %s", exc)
 
 
 @bot.message_handler(
@@ -778,11 +828,15 @@ def order_create(call):
         "email": None,
         "rating": None,
     }
+    partners.apply_to_order(order, chat_id, state.get("promo"))
     save_order(order)
     save_anketa_update(state, order_id=order_id)
     bot.answer_callback_query(call.id)
 
-    if send_order_invoice(chat_id, order):
+    if order["price_rub"] <= 0:  # скидка и баланс покрыли всё — выдаём без оплаты
+        notify_admin_new_order(order)
+        fulfill_order(chat_id, order_id, "free", None)
+    elif send_order_invoice(chat_id, order):
         notify_admin_new_order(order)
 
 
@@ -1192,6 +1246,10 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     order["email"] = email or order.get("email")
     save_order(order)
     STATES.pop(chat_id, None)
+    try:  # закрепление партнёра, начисление, промокод, баланс, бонус другу — сбой не должен мешать выдаче
+        partners.on_paid(order)
+    except Exception as exc:
+        log.error("partners.on_paid %s: %s", order_id, exc)
 
     if order.get("channel") == "vk":
         import vk_shop
@@ -1206,20 +1264,6 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     if profile:
         profile["total_spent_rub"] = profile.get("total_spent_rub", 0) + order["price_rub"]
         write_json(client_path(chat_id), profile)
-        inviter_id = None if order.get("is_test") else profile.get("referred_by")
-        if inviter_id:
-            inviter = get_client(inviter_id)
-            if inviter:
-                inviter["bonus_rub"] = inviter.get("bonus_rub", 0) + 50
-                write_json(client_path(inviter_id), inviter)
-                try:
-                    bot.send_message(
-                        inviter_id,
-                        f"🎁 {profile['name']} заказал(а) письмо по твоей ссылке.\n"
-                        f"Тебе начислено 50₽. Всего бонусов: {inviter['bonus_rub']}₽.",
-                    )
-                except Exception:
-                    pass
 
     if order.get("product") == OCC.PACK["key"]:
         profile = get_client(chat_id) or {}
@@ -1243,6 +1287,7 @@ def fulfill_order(chat_id, order_id, charge_id, email):
     meta = pain_meta(order)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("👤 Открыть кабинет", callback_data="cab:home"))
+    kb.add(partners.friend_gift_markup(chat_id))
 
     receipt_line = (
         f"Чек придёт на {esc(order['email'])}\n\n" if order.get("email") else ""
@@ -1468,7 +1513,8 @@ def gift_link(call):
         "✍️ <b>Ссылка для друга</b>\n\n"
         f"<code>{link}</code>\n\n"
         "Нажми на ссылку, чтобы скопировать, и отправь другу.\n"
-        "Когда он оплатит первое письмо, тебе начислится 50₽.\n\n"
+        f"У друга — скидка {partners.FRIEND_DISCOUNT}% на первое письмо. Когда он оплатит, тебе — "
+        f"{partners.FRIEND_BONUS_RUB}₽ на баланс: они спишутся в твоём следующем заказе.\n\n"
         f"Приглашено: {len(profile.get('referrals', []))} · "
         f"бонусов: {profile.get('bonus_rub', 0)}₽"
     )
@@ -1753,8 +1799,9 @@ def occ_preview_markup(state):
     if credits:
         kb.add(types.InlineKeyboardButton(f"🎁 Забрать по набору (осталось {credits})",
                                           callback_data="occ:credit"))
-    kb.add(types.InlineKeyboardButton(f"💳 Оплатить — {state.get('price') or p['price']}₽",
-                                      callback_data="occ:buy"))
+    q = partners.quote(state.get("chat_id", 0), price_base(state), state.get("promo"))
+    kb.add(types.InlineKeyboardButton(f"💳 Оплатить — {partners.button_price(q)}", callback_data="occ:buy"))
+    kb.add(types.InlineKeyboardButton("🎟 Есть промокод", callback_data="pr:enter"))
     left = max(0, FREE_RETEXTS - state.get("retexts", 0))
     label = f"✏️ Изменить текст (ещё {left})" if left else "✏️ Изменить текст — по твоему пожеланию"
     if left == 0 and state.get("wish_used"):
@@ -1766,9 +1813,11 @@ def occ_preview_markup(state):
 
 
 def occ_preview_text(state):
+    lines = partners.price_lines(partners.quote(state.get("chat_id", 0), price_base(state), state.get("promo")))
     return (occ_masked_preview(state["letter"])
             + "\n\n🔒 Вторая половина письма, чистая открытка без надписи «превью» "
-              "и ссылка-конверт для получателя — после оплаты.")
+              "и ссылка-конверт для получателя — после оплаты."
+            + (f"\n\n{lines}" if lines else ""))
 
 
 def occ_photo_markup():
@@ -1819,7 +1868,7 @@ def occ_refresh_text(chat_id, state):
 def occ_pc_next(call):
     chat_id = call.message.chat.id
     state = STATES.get(chat_id) or {}
-    if state.get("step") not in ("occ_paywall", "occ_wish"):
+    if state.get("step") not in ("occ_paywall", "occ_wish", "promo_enter"):
         bot.answer_callback_query(call.id, "Заказ устарел — начни заново", show_alert=True)
         return
     ref = cardbase_pick(chat_id, state["product"], state.get("card_seen", []))
@@ -1938,6 +1987,8 @@ def occ_make_order(chat_id, user, state, status="pending", price=None):
     }
     if calendar_reminders.is_from_reminder(chat_id):
         order["from_reminder"] = True  # человек пришёл с напоминания календаря (метрика)
+    if price is None:  # обычная покупка: скидки (одна, наибольшая) и баланс; набор/бесплатно — без них
+        partners.apply_to_order(order, chat_id, state.get("promo"))
     if state.get("group"):
         order["group_id"] = state["group"]
         group_letters.mark_ordered(state["group"], order["order_id"])
@@ -1950,12 +2001,16 @@ def occ_buy(call):
     chat_id = call.message.chat.id
     state = STATES.get(chat_id) or {}
     bot.answer_callback_query(call.id)
-    if state.get("step") != "occ_paywall":
+    if state.get("step") not in ("occ_paywall", "occ_wish", "promo_enter"):
         safe_edit(call, f"Заказ устарел. Начни заново: «{OCC_BUTTON}».")
         return
+    state["step"] = "occ_paywall"
     order = occ_make_order(chat_id, call.from_user, state)
     cb_event(chat_id, "buy", state["product"], state.get("card_ref"))
-    if send_order_invoice(chat_id, order):
+    if order["price_rub"] <= 0:  # скидка и баланс покрыли всё — выдаём без оплаты
+        notify_admin_new_order(order)
+        fulfill_order(chat_id, order["order_id"], "free", None)
+    elif send_order_invoice(chat_id, order):
         notify_admin_new_order(order)
 
 
@@ -1999,6 +2054,7 @@ def occ_pack(call):
         "created_at": now_msk().isoformat(), "paid_at": None, "delivered_at": None,
         "email": None, "rating": None,
     }
+    partners.apply_to_order(order, chat_id)
     save_order(order)
     bot.send_message(
         chat_id,
@@ -2007,7 +2063,10 @@ def occ_pack(call):
         f"Вместо {3 * OCC.price_from()}₽ — {OCC.PACK['price']}₽. "
         "Письма из набора не сгорают: пишешь, когда появится повод.",
         parse_mode="HTML")
-    send_order_invoice(chat_id, order)
+    if order["price_rub"] <= 0:
+        fulfill_order(chat_id, order["order_id"], "free", None)
+    else:
+        send_order_invoice(chat_id, order)
 
 
 # ── Новые фоны открыток: вечерняя подборка владельцу с кнопками ✅/❌ ──
@@ -2167,6 +2226,7 @@ def occ_deliver(chat_id, order):
             query=f"card_{occ_gift_code(order)}", allow_user_chats=True, allow_group_chats=True),
     ))
     kb.add(types.InlineKeyboardButton("📤 Отправить ссылкой (WhatsApp, другие чаты)", url=share_url))
+    kb.add(partners.friend_gift_markup(order["chat_id"]))
     kb.add(types.InlineKeyboardButton("🎀 Ещё одно письмо с открыткой", callback_data="occ:catalog"))
     bot.send_message(
         chat_id,
@@ -3027,6 +3087,11 @@ def admin_cabinet(message):
 
 @bot.message_handler(commands=["cancel"])
 def admin_cancel(message):
+    st = STATES.get(message.chat.id) or {}
+    if st.get("step") == "promo_enter":  # отмена ввода промокода не должна терять письмо
+        st["step"] = st.pop("promo_back", "occ_paywall" if st.get("product") else "paywall")
+        bot.send_message(message.chat.id, "Хорошо, оставляю как есть.")
+        return
     STATES.pop(message.chat.id, None)
     bot.send_message(message.chat.id, "Отменено.")
 
@@ -3491,6 +3556,7 @@ def start_autobackup():
 
 group_letters.register(sys.modules[__name__])  # до fallback: его обработчик ловит любой текст
 calendar_reminders.register(sys.modules[__name__])
+partners.register(sys.modules[__name__])
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -3677,6 +3743,7 @@ def bot_stats(days=62):
         "cards": cardbase.report(days),
         "groups": group_letters.report(),
         "calendar": calendar_reminders.report(days),
+        "partners": partners.report(),
     }
 
 

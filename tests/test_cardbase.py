@@ -134,7 +134,7 @@ assert cbs(kinds("send_photo")[-1][2]["reply_markup"]) == ["occ:pc:next"]
 text_msg = kinds("send_message")[-1]
 shown = text_msg[1][1]
 assert "▒" in shown and "ВТОРАЯ_ПОЛОВИНА_СЕКРЕТ" not in shown and "Первая половина" in shown, shown
-assert cbs(text_msg[2]["reply_markup"]) == ["occ:buy", "occ:retext", "letter:cancel"]
+assert cbs(text_msg[2]["reply_markup"]) == ["occ:buy", "pr:enter", "occ:retext", "letter:cancel"]
 assert cardbase.report(1)["previews"] == 1
 
 # другая картинка — бесплатно и без лимита, без повторов
